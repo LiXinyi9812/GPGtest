@@ -2,7 +2,7 @@
 <play-publishing-config version="1.0">
   <application>
     <package-name>com.dynasty.cnpdctest</package-name>
-    <version-name>0.0.7</version-name>
+    <version-name>0.0.8</version-name>
   </application>
   <installer requiresElevation="true" acceptsCommandLineArguments="false">
     <path>GPGInstaller.exe</path>
