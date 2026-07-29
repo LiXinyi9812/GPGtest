@@ -1,0 +1,30 @@
+# Visual Studio generated files
+.vs/
+
+# Build output
+obj/
+
+# User-specific project files
+*.vcxproj.user
+*.suo
+*.user
+
+# IntelliSense / precompiled headers
+*.ipch
+*.aps
+*.ncb
+*.opendb
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.db-shm
+*.VC.db-wal
+
+# Build logs
+*.log
+*.tlog/
+
+# Debug files
+*.ilk
+*.pdb

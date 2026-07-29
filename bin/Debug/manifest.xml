@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Manifest version="1">
+    <Application>
+        <PackageName>com.dynasty.cnpdctest</PackageName>
+        <IsDeveloperMode>false</IsDeveloperMode>
+    </Application>
+</Manifest>

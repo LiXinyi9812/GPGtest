@@ -1,0 +1,9 @@
+#include "installer_resources.h"
+
+// 嵌入安装所需的文件作为 RCDATA 资源
+// 路径相对于项目目录，构建时这些文件需要存在于 bin\Debug 或 bin\Release 目录
+IDR_FILE_LAUNCHER    RCDATA  "bin\\Debug\\GPGLauncher.exe"
+IDR_FILE_GPG         RCDATA  "bin\\Debug\\GPG.exe"
+IDR_FILE_UNINSTALLER RCDATA  "bin\\Debug\\GPGUninstaller.exe"
+IDR_FILE_SDK_DLL     RCDATA  "bin\\Debug\\play_pc_sdk.dll"
+IDR_FILE_MANIFEST    RCDATA  "bin\\Debug\\manifest.xml"

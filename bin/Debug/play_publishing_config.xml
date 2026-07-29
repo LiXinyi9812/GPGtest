@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<play-publishing-config version="1.0">
+  <application>
+    <package-name>com.dynasty.cnpdctest</package-name>
+    <version-name>0.0.7</version-name>
+  </application>
+  <installer requiresElevation="true" acceptsCommandLineArguments="false">
+    <path>GPGInstaller.exe</path>
+    <installation-path-registry-location>
+      <key-name>Software\Microsoft\Windows\CurrentVersion\Uninstall\GPG Application</key-name>
+      <value-name>InstallLocation</value-name>
+    </installation-path-registry-location>
+  </installer>
+  <launcher requiresElevation="false">
+    <launch-path-registry-location>
+      <key-name>Software\Microsoft\Windows\CurrentVersion\Uninstall\GPG Application</key-name>
+      <value-name>InstallLocation</value-name>
+    </launch-path-registry-location>
+    <executable-invocation>
+      <filename>GPGLauncher.exe</filename>
+      <arguments></arguments>
+    </executable-invocation>
+  </launcher>
+  <uninstaller requiresElevation="false">
+    <uninstall-path-registry-location>
+      <key-name>Software\Microsoft\Windows\CurrentVersion\Uninstall\GPG Application</key-name>
+      <value-name>UninstallString</value-name>
+    </uninstall-path-registry-location>
+  </uninstaller>
+</play-publishing-config>

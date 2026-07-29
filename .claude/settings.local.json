@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find \"/c/Program Files \\(x86\\)/Windows Kits\" -name \"signtool.exe\" 2>/dev/null | head -5)",
+      "Read(//c/Program Files \\\\\\(x86\\\\\\)/Windows Kits/**)",
+      "Bash(./play_publishing_tool_1.0.3.exe build-installer-bundle *)",
+      "Bash(where /R \"C:\\\\Program Files\" MSBuild.exe)",
+      "Bash(ls -la \"C:/Program Files/Microsoft Visual Studio/2022/\" 2>/dev/null || echo \"Directory not found\")",
+      "Read(//c/Program Files/Microsoft Visual Studio/**)",
+      "Bash(ls -la \"C:/Program Files \\(x86\\)/Microsoft Visual Studio/\" 2>/dev/null || echo \"Directory not found\")",
+      "Read(//c/Program Files \\\\\\(x86\\\\\\)/Microsoft Visual Studio/**)",
+      "Bash(\"/c/Program Files \\(x86\\)/Microsoft Visual Studio/Installer/vswhere.exe\" -latest -requires Microsoft.Component.MSBuild -find \"MSBuild\\\\**\\\\Bin\\\\MSBuild.exe\")",
+      "Bash(msbuild.exe GPGUninstaller.vcxproj /p:Configuration=Debug /p:Platform=x64)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/18/Community/MSBuild/Current/Bin/MSBuild.exe\" GPGUninstaller.vcxproj /p:Configuration=Debug /p:Platform=x64 /v:m)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/18/Community/MSBuild/Current/Bin/MSBuild.exe\" GPGUninstaller.vcxproj -p:Configuration=Debug -p:Platform=x64 -v:m)",
+      "Bash(\"./play_publishing_tool_1.0.3.exe\" pack *)",
+      "Bash(\"./play_publishing_tool_1.0.3.exe\" build-bundle *)",
+      "Bash(./play_publishing_tool_1.0.3.exe build-bundle *)",
+      "Bash(./play_publishing_tool_1.0.3.exe help *)",
+      "Bash(unzip -l GPG.wab)",
+      "Bash(cd ../.. && pwd)",
+      "Read(//c/Users/devre/**)",
+      "Bash(./bin/Debug/play_publishing_tool_1.0.3.exe help *)",
+      "Bash(where playpublishingtool.exe)",
+      "Read(//c/Program Files/Google/**)",
+      "Read(//c/Program Files/**)",
+      "Read(//c/Program Files \\\\\\(x86\\\\\\)/**)",
+      "Bash(xxd -l 64 \"c:/Users/devre/OneDrive/GPG/bin/Debug/GPG.wab\")",
+      "Bash(xxd)",
+      "Bash(python3 -c ' *)",
+      "Bash(unzip -l \"c:/Users/devre/OneDrive/GPG/bin/Debug/GPG.wab\")",
+      "Bash(unzip -p \"c:/Users/devre/OneDrive/GPG/bin/Debug/GPG.wab\" installer/installer.exe)",
+      "Bash(dd bs=1 skip=14885200 count=200)"
+    ]
+  }
+}
