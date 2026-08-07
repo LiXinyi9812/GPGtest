@@ -10,7 +10,7 @@ using google::play::initialization::InitializeResult;
 using google::play::initialization::InitializationError;
 
 // 游戏可执行文件名（与 launcher 位于同一目录）
-static constexpr const wchar_t* GAME_EXECUTABLE = L"GPG.exe";
+static constexpr const wchar_t* GAME_EXECUTABLE = L"game.exe";
 
 // 构建子进程命令行，转发所有从 GooglePlayGames.exe 收到的参数
 std::wstring BuildChildCommandLine(const wchar_t* gameExe, int argc, wchar_t* argv[]) {
