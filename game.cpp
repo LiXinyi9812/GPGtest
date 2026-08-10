@@ -4,11 +4,15 @@
 #include <string>
 #include <memory>
 #include <chrono>
+#include <vector>
 #include <windows.h>
+#include <winhttp.h>
 #include "initialization/initialization.h"
 #include "billing/client.h"
 #include "billing/models.h"
 #include "billing/enums.h"
+
+#pragma comment(lib, "winhttp.lib")
 
 #define LOG(msg) do { \
     auto now = std::chrono::system_clock::now(); \
@@ -23,8 +27,126 @@
 using namespace google::play::initialization;
 using namespace google::play::billing;
 
+// ============================================================
+// 后端服务器配置
+// ============================================================
+static const wchar_t* BILLING_SERVER_HOST = L"localhost";
+static const int BILLING_SERVER_PORT = 3000;
+static const char* API_SECRET_KEY = "gpg_billing_secret_key_2024";
+static const char* PRODUCT_ID = "100_coins";
+
 std::unique_ptr<BillingClient> g_billing_client;
 HWND g_gameWindow = nullptr;
+
+// ============================================================
+// HTTP 请求: 将 purchase_token 发送到后端验证
+// ============================================================
+
+struct ServerVerifyResult {
+    bool success;
+    std::string order_id;
+    std::string error;
+};
+
+ServerVerifyResult VerifyPurchaseWithServer(const std::string& product_id,
+                                           const std::string& purchase_token) {
+    ServerVerifyResult result = { false, "", "" };
+
+    // 构造 JSON 请求体
+    std::ostringstream json_body;
+    json_body << "{\"product_id\":\"" << product_id
+              << "\",\"purchase_token\":\"" << purchase_token << "\"}";
+    std::string body = json_body.str();
+
+    // 初始化 WinHTTP
+    HINTERNET hSession = WinHttpOpen(L"GPG-BillingClient/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) {
+        result.error = "WinHttpOpen failed";
+        return result;
+    }
+
+    HINTERNET hConnect = WinHttpConnect(hSession, BILLING_SERVER_HOST,
+        BILLING_SERVER_PORT, 0);
+    if (!hConnect) {
+        result.error = "WinHttpConnect failed";
+        WinHttpCloseHandle(hSession);
+        return result;
+    }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST",
+        L"/api/verify-and-consume", NULL, WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) {
+        result.error = "WinHttpOpenRequest failed";
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return result;
+    }
+
+    // 设置请求头
+    std::wstring headers = L"Content-Type: application/json\r\n";
+    headers += L"x-api-key: ";
+    std::wstring wApiKey(API_SECRET_KEY, API_SECRET_KEY + strlen(API_SECRET_KEY));
+    headers += wApiKey;
+    headers += L"\r\n";
+
+    BOOL bResult = WinHttpSendRequest(hRequest, headers.c_str(),
+        (DWORD)headers.length(), (LPVOID)body.c_str(), (DWORD)body.length(),
+        (DWORD)body.length(), 0);
+
+    if (!bResult || !WinHttpReceiveResponse(hRequest, NULL)) {
+        result.error = "HTTP request failed";
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return result;
+    }
+
+    // 读取响应
+    std::string response;
+    DWORD dwSize = 0, dwDownloaded = 0;
+    do {
+        WinHttpQueryDataAvailable(hRequest, &dwSize);
+        if (dwSize == 0) break;
+        std::vector<char> buffer(dwSize + 1, 0);
+        WinHttpReadData(hRequest, buffer.data(), dwSize, &dwDownloaded);
+        response.append(buffer.data(), dwDownloaded);
+    } while (dwSize > 0);
+
+    // 检查 HTTP 状态码
+    DWORD statusCode = 0;
+    DWORD statusCodeSize = sizeof(statusCode);
+    WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize,
+        WINHTTP_NO_HEADER_INDEX);
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    std::ostringstream log_msg;
+    log_msg << "Backend response (HTTP " << statusCode << "): " << response;
+    LOG(log_msg.str().c_str());
+
+    if (statusCode == 200) {
+        result.success = true;
+        // 简单解析 order_id (生产环境建议用 JSON 库)
+        size_t pos = response.find("\"order_id\":\"");
+        if (pos != std::string::npos) {
+            pos += 12;
+            size_t end = response.find("\"", pos);
+            if (end != std::string::npos) {
+                result.order_id = response.substr(pos, end - pos);
+            }
+        }
+    } else {
+        result.error = "Backend rejected: HTTP " + std::to_string(statusCode);
+    }
+
+    return result;
+}
 
 // 带消息泵的等待，避免阻塞 UI 线程
 template<typename T>
@@ -40,23 +162,25 @@ T WaitWithMessagePump(std::future<T>& future) {
     return future.get();
 }
 
-bool ConsumePurchase(const std::string& purchase_token) {
+bool ProcessPurchaseWithBackend(const std::string& purchase_token) {
     std::ostringstream log_msg;
-    log_msg << "Consuming purchase, token: " << purchase_token;
+    log_msg << "Processing purchase, token: " << purchase_token.substr(0, 20) << "...";
     LOG(log_msg.str().c_str());
 
-    ConsumePurchaseParams params;
-    params.purchase_token = purchase_token;
+    LOG("Sending to backend for verification, acknowledge and consume...");
+    auto result = VerifyPurchaseWithServer(PRODUCT_ID, purchase_token);
 
-    auto promise = std::make_shared<std::promise<bool>>();
-    auto future = promise->get_future();
-    g_billing_client->ConsumePurchase(params,
-        [promise](ConsumePurchaseResult result) {
-            std::string log_result = result.ok() ? "Consume succeeded" : "Consume FAILED";
-            LOG(log_result.c_str());
-            promise->set_value(result.ok());
-        });
-    return WaitWithMessagePump(future);
+    if (!result.success) {
+        std::ostringstream err_log;
+        err_log << "Backend processing FAILED: " << result.error;
+        LOG(err_log.str().c_str());
+        return false;
+    }
+
+    std::ostringstream ok_log;
+    ok_log << "Backend processed OK, order_id: " << result.order_id;
+    LOG(ok_log.str().c_str());
+    return true;
 }
 
 void ConsumeExistingPurchases() {
@@ -75,7 +199,7 @@ void ConsumeExistingPurchases() {
     }
     for (auto& p : result.value().product_purchase_details) {
         if (p.purchase_state == PurchaseState::kPurchaseStatePurchased)
-            ConsumePurchase(p.purchase_token);
+            ProcessPurchaseWithBackend(p.purchase_token);
     }
 }
 
@@ -147,7 +271,7 @@ int StartPurchaseFlow() {
     auto purchase_result = WaitWithMessagePump(pf);
     int code = purchase_result.first;
     std::string token = purchase_result.second;
-    if (code == 0 && !token.empty()) ConsumePurchase(token);
+    if (code == 0 && !token.empty()) ProcessPurchaseWithBackend(token);
     ShowWindow(g_gameWindow, SW_HIDE);
     return code;
 }
