@@ -7,8 +7,15 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const Database = require('better-sqlite3');
 
+const crypto = require('crypto');
+
 const app = express();
-app.use(express.json());
+// 保存原始 body 以便后续计算 hash (与客户端一致)
+app.use(express.json({
+  verify: (req, _res, buf) => {
+    req.rawBody = buf;
+  },
+}));
 app.use(helmet());
 
 // 速率限制: 每个 IP 每分钟最多 30 次请求
@@ -24,7 +31,7 @@ app.use('/api/', limiter);
 // ============================================================
 
 const db = new Database(path.join(__dirname, 'coins.db'));
-db.pragma('journal_mode = WAL');
+db.pragma('journal_mode = DELETE');
 
 // 创建金币表 (单用户简化版，仅一行记录)
 db.exec(`
@@ -35,14 +42,29 @@ db.exec(`
   )
 `);
 
+// 创建分数表 (单用户简化版，仅一行记录)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS score (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    score INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
 // 确保有一行初始数据
 const initRow = db.prepare('INSERT OR IGNORE INTO wallet (id, coins) VALUES (1, 0)');
 initRow.run();
+const initScore = db.prepare('INSERT OR IGNORE INTO score (id, score) VALUES (1, 0)');
+initScore.run();
 
 // 预编译常用语句
 const getCoins = db.prepare('SELECT coins FROM wallet WHERE id = 1');
 const addCoins = db.prepare(`
   UPDATE wallet SET coins = coins + ?, updated_at = datetime('now') WHERE id = 1
+`);
+const getScore = db.prepare('SELECT score FROM score WHERE id = 1');
+const addScore = db.prepare(`
+  UPDATE score SET score = score + ?, updated_at = datetime('now') WHERE id = 1
 `);
 
 // ============================================================
@@ -51,11 +73,13 @@ const addCoins = db.prepare(`
 
 const PACKAGE_NAME = process.env.PACKAGE_NAME || 'com.mycompany.mygame';
 const API_SECRET_KEY = process.env.API_SECRET_KEY || 'your-secret-key-here';
+const CLOUD_PROJECT_NUMBER = process.env.CLOUD_PROJECT_NUMBER || '';
 const ALLOWED_PRODUCT_IDS = (process.env.ALLOWED_PRODUCT_IDS || '100_coins')
   .split(',')
   .map((id) => id.trim());
 
 let playDeveloperApi = null;
+let integrityAuthClient = null;
 
 async function initGoogleApi() {
   const keyFilePath = process.env.GOOGLE_SERVICE_ACCOUNT_KEY
@@ -63,7 +87,10 @@ async function initGoogleApi() {
 
   const auth = new google.auth.GoogleAuth({
     keyFile: path.resolve(__dirname, keyFilePath),
-    scopes: ['https://www.googleapis.com/auth/androidpublisher'],
+    scopes: [
+      'https://www.googleapis.com/auth/androidpublisher',
+      'https://www.googleapis.com/auth/playintegrity',
+    ],
   });
 
   playDeveloperApi = google.androidpublisher({
@@ -71,7 +98,180 @@ async function initGoogleApi() {
     auth: auth,
   });
 
+  // 保存 auth client，用于直接调用 Play Integrity REST API
+  integrityAuthClient = await auth.getClient();
+
   console.log('[Billing Server] Google Play API initialized.');
+  console.log('[Billing Server] Play Integrity API initialized (REST mode for PC).');
+}
+
+// ============================================================
+// Play Integrity 验证 (PC)
+// ============================================================
+
+/**
+ * 解密并验证 Play Integrity 令牌
+ * @param {string} integrityToken - 客户端获取的完整性令牌
+ * @param {string} expectedRequestHash - 期望的 request_hash (客户端请求体的 SHA256)
+ * @returns {{ valid: boolean, error?: string, verdict?: object }}
+ */
+async function verifyIntegrityToken(integrityToken, expectedRequestHash) {
+  if (!integrityToken) {
+    return { valid: false, error: 'Missing integrity token' };
+  }
+
+  try {
+    // 直接调用 REST API: playintegrity.googleapis.com/v1/{packageName}:decodePcIntegrityToken
+    const url = `https://playintegrity.googleapis.com/v1/${PACKAGE_NAME}:decodePcIntegrityToken`;
+    const response = await integrityAuthClient.request({
+      url,
+      method: 'POST',
+      data: { integrity_token: integrityToken },
+    });
+
+    const rawResponse = response.data;
+    console.log('[INTEGRITY] Decoded verdict:', JSON.stringify(rawResponse, null, 2));
+
+    // PC 端返回结构: { tokenPayloadExternal: { requestDetails, deviceIntegrity, accountDetails } }
+    const verdict = rawResponse.tokenPayloadExternal || rawResponse;
+
+    // 1) 验证 requestPackageName
+    const requestDetails = verdict.requestDetails || {};
+    if (requestDetails.requestPackageName !== PACKAGE_NAME) {
+      return {
+        valid: false,
+        error: `Package name mismatch: ${requestDetails.requestPackageName}`,
+        verdict,
+      };
+    }
+
+    // 2) 验证 requestHash (防止请求被篡改)
+    if (expectedRequestHash && requestDetails.requestHash !== expectedRequestHash) {
+      return {
+        valid: false,
+        error: 'Request hash mismatch - potential tampering detected',
+        verdict,
+      };
+    }
+
+    // 3) 验证设备完整性 (PC 环境)
+    const deviceIntegrity = verdict.deviceIntegrity || {};
+    const deviceVerdict = deviceIntegrity.deviceRecognitionVerdict || [];
+    if (!deviceVerdict.includes('MEETS_PC_INTEGRITY')) {
+      return {
+        valid: false,
+        error: `Device integrity check failed: [${deviceVerdict.join(', ')}]`,
+        verdict,
+      };
+    }
+
+    // 4) 验证应用许可证 (暂时跳过，测试阶段可能返回 UNLICENSED)
+    // const accountDetails = verdict.accountDetails || {};
+    // if (accountDetails.appLicensingVerdict === 'UNLICENSED') {
+    //   console.log('[INTEGRITY] WARNING: App is UNLICENSED (sideloaded).');
+    //   return {
+    //     valid: false,
+    //     error: 'App is not licensed through Google Play',
+    //     verdict,
+    //   };
+    // }
+
+    return { valid: true, verdict };
+  } catch (error) {
+    console.error('[INTEGRITY] Token verification failed:', error.message);
+    return { valid: false, error: `Integrity API error: ${error.message}` };
+  }
+}
+
+/**
+ * Express 中间件: 对敏感接口强制执行 Play Integrity 校验
+ * 客户端需在 Header 中传入:
+ *   x-integrity-token: <token>
+ *   x-request-hash: <sha256 of request body>
+ */
+function integrityMiddleware(req, res, next) {
+  // 如果未配置 Play Integrity (开发环境)，跳过
+  if (!integrityAuthClient || process.env.SKIP_INTEGRITY === 'true') {
+    return next();
+  }
+
+  const integrityToken = req.headers['x-integrity-token'];
+  if (!integrityToken) {
+    return res.status(403).json({
+      error: 'Integrity token required. Request rejected.',
+    });
+  }
+
+  const expectedHash = req.headers['x-request-hash'] || '';
+
+  verifyIntegrityToken(integrityToken, expectedHash)
+    .then((result) => {
+      if (!result.valid) {
+        console.log(`[INTEGRITY] REJECTED: ${result.error}`);
+        return res.status(403).json({
+          error: `Integrity verification failed: ${result.error}`,
+        });
+      }
+      // 通过，继续处理请求
+      req.integrityVerdict = result.verdict;
+      next();
+    })
+    .catch((err) => {
+      console.error('[INTEGRITY] Middleware error:', err);
+      return res.status(500).json({
+        error: 'Integrity verification internal error.',
+      });
+    });
+}
+
+/**
+ * Express 中间件: 对 add-score 等接口执行 Play Integrity 校验 (服务端计算 hash)
+ *
+ * 与 integrityMiddleware 不同的是:
+ *   - 客户端不传 x-request-hash，只传 x-integrity-token 和请求体
+ *   - 服务端根据与客户端相同的规则 (SHA256 of raw body) 自行计算 hash
+ *   - 将计算的 hash 与 integrity token 解密后的 requestHash 进行比对
+ */
+function integrityWithServerHashMiddleware(req, res, next) {
+  // 如果未配置 Play Integrity (开发环境)，跳过
+  if (!integrityAuthClient || process.env.SKIP_INTEGRITY === 'true') {
+    return next();
+  }
+
+  const integrityToken = req.headers['x-integrity-token'];
+  if (!integrityToken) {
+    return res.status(403).json({
+      error: 'Integrity token required. Request rejected.',
+    });
+  }
+
+  // 服务端根据 raw body 计算 SHA256，与客户端 ComputeSHA256(body) 规则一致
+  if (!req.rawBody) {
+    return res.status(400).json({
+      error: 'Missing request body for hash computation.',
+    });
+  }
+  const computedHash = crypto.createHash('sha256').update(req.rawBody).digest('hex');
+  console.log(`[INTEGRITY] Server computed request hash: ${computedHash}`);
+
+  verifyIntegrityToken(integrityToken, computedHash)
+    .then((result) => {
+      if (!result.valid) {
+        console.log(`[INTEGRITY] REJECTED: ${result.error}`);
+        return res.status(403).json({
+          error: `Integrity verification failed: ${result.error}`,
+        });
+      }
+      // 通过，继续处理请求
+      req.integrityVerdict = result.verdict;
+      next();
+    })
+    .catch((err) => {
+      console.error('[INTEGRITY] Middleware error:', err);
+      return res.status(500).json({
+        error: 'Integrity verification internal error.',
+      });
+    });
 }
 
 // ============================================================
@@ -111,6 +311,52 @@ app.get('/api/health', (req, res) => {
 app.get('/api/coins', authMiddleware, (req, res) => {
   const row = getCoins.get();
   res.json({ coins: row ? row.coins : 0 });
+});
+
+/**
+ * GET /api/score
+ * Headers: x-api-key
+ *
+ * 查询当前分数
+ */
+app.get('/api/score', authMiddleware, (req, res) => {
+  const row = getScore.get();
+  res.json({ score: row ? row.score : 0 });
+});
+
+/**
+ * POST /api/add-score
+ * Body: { addscore: <int> }
+ * Headers: x-api-key, x-integrity-token
+ *
+ * 给数据库中的 score 增加 addscore 分
+ * 受 Play Integrity 中间件保护 (服务端自行计算 request hash 并与 token 中的 hash 比对)
+ */
+app.post('/api/add-score', authMiddleware, integrityWithServerHashMiddleware, (req, res) => {
+  const { addscore, timestamp } = req.body;
+
+  console.log(`[SCORE] Received add-score request body:`, JSON.stringify(req.body));
+
+  if (addscore == null || !Number.isInteger(addscore) || addscore <= 0) {
+    return res.status(400).json({ error: 'Invalid addscore: must be a positive integer.' });
+  }
+
+  // 校验时间戳: 拒绝超过 60 秒的请求 (防重放)
+  if (!timestamp || !Number.isInteger(timestamp)) {
+    return res.status(400).json({ error: 'Missing or invalid timestamp.' });
+  }
+  const now = Date.now();
+  const diff = Math.abs(now - timestamp);
+  if (diff > 60 * 1000) {
+    console.log(`[SCORE] REJECTED: timestamp too old/future, diff=${diff}ms`);
+    return res.status(403).json({ error: 'Request expired or timestamp invalid.' });
+  }
+
+  addScore.run(addscore);
+  const newScore = getScore.get().score;
+
+  console.log(`[SCORE] Added ${addscore} points, new score: ${newScore}`);
+  return res.json({ success: true, score_added: addscore, total_score: newScore });
 });
 
 /**
