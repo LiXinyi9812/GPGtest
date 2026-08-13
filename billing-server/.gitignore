@@ -2,3 +2,6 @@ node_modules/
 .env
 service-account-key.json
 *.log
+coins.db
+coins.db-wal
+coins.db-shm

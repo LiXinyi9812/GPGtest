@@ -37,6 +37,77 @@ static const char* PRODUCT_ID = "100_coins";
 
 std::unique_ptr<BillingClient> g_billing_client;
 HWND g_gameWindow = nullptr;
+int g_total_coins = 0;  // 当前金币余额
+
+// ============================================================
+// HTTP 工具: 发送 GET 请求查询金币余额
+// ============================================================
+
+int QueryCoinsFromServer() {
+    HINTERNET hSession = WinHttpOpen(L"GPG-BillingClient/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return -1;
+
+    HINTERNET hConnect = WinHttpConnect(hSession, BILLING_SERVER_HOST,
+        BILLING_SERVER_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return -1; }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET",
+        L"/api/coins", NULL, WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return -1;
+    }
+
+    // 设置鉴权头
+    std::wstring headers = L"x-api-key: ";
+    std::wstring wApiKey(API_SECRET_KEY, API_SECRET_KEY + strlen(API_SECRET_KEY));
+    headers += wApiKey;
+    headers += L"\r\n";
+
+    BOOL bResult = WinHttpSendRequest(hRequest, headers.c_str(),
+        (DWORD)headers.length(), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+
+    if (!bResult || !WinHttpReceiveResponse(hRequest, NULL)) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return -1;
+    }
+
+    // 读取响应
+    std::string response;
+    DWORD dwSize = 0, dwDownloaded = 0;
+    do {
+        WinHttpQueryDataAvailable(hRequest, &dwSize);
+        if (dwSize == 0) break;
+        std::vector<char> buffer(dwSize + 1, 0);
+        WinHttpReadData(hRequest, buffer.data(), dwSize, &dwDownloaded);
+        response.append(buffer.data(), dwDownloaded);
+    } while (dwSize > 0);
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    // 解析 {"coins": N}
+    int coins = 0;
+    size_t pos = response.find("\"coins\":");
+    if (pos != std::string::npos) {
+        pos += 8;
+        size_t end = response.find_first_not_of("0123456789 ", pos);
+        std::string num_str;
+        for (size_t i = pos; i < response.size() && (isdigit(response[i]) || response[i] == ' '); ++i) {
+            if (isdigit(response[i])) num_str += response[i];
+        }
+        if (!num_str.empty()) coins = std::stoi(num_str);
+    }
+
+    return coins;
+}
 
 // ============================================================
 // HTTP 请求: 将 purchase_token 发送到后端验证
@@ -46,11 +117,13 @@ struct ServerVerifyResult {
     bool success;
     std::string order_id;
     std::string error;
+    int coins_added;
+    int total_coins;
 };
 
 ServerVerifyResult VerifyPurchaseWithServer(const std::string& product_id,
                                            const std::string& purchase_token) {
-    ServerVerifyResult result = { false, "", "" };
+    ServerVerifyResult result = { false, "", "", 0, 0 };
 
     // 构造 JSON 请求体
     std::ostringstream json_body;
@@ -141,6 +214,24 @@ ServerVerifyResult VerifyPurchaseWithServer(const std::string& product_id,
                 result.order_id = response.substr(pos, end - pos);
             }
         }
+        // 解析 coins_added
+        pos = response.find("\"coins_added\":");
+        if (pos != std::string::npos) {
+            pos += 14;
+            size_t end = response.find_first_not_of("0123456789", pos);
+            if (end != std::string::npos) {
+                result.coins_added = std::stoi(response.substr(pos, end - pos));
+            }
+        }
+        // 解析 total_coins
+        pos = response.find("\"total_coins\":");
+        if (pos != std::string::npos) {
+            pos += 14;
+            size_t end = response.find_first_not_of("0123456789", pos);
+            if (end != std::string::npos) {
+                result.total_coins = std::stoi(response.substr(pos, end - pos));
+            }
+        }
     } else {
         result.error = "Backend rejected: HTTP " + std::to_string(statusCode);
     }
@@ -177,9 +268,21 @@ bool ProcessPurchaseWithBackend(const std::string& purchase_token) {
         return false;
     }
 
+    // 更新本地金币余额
+    g_total_coins = result.total_coins;
+
     std::ostringstream ok_log;
-    ok_log << "Backend processed OK, order_id: " << result.order_id;
+    ok_log << "Backend processed OK, order_id: " << result.order_id
+           << ", +" << result.coins_added << " coins, total: " << result.total_coins;
     LOG(ok_log.str().c_str());
+
+    // 显示购买成功提示
+    std::ostringstream msg;
+    msg << "Purchase successful!\n\n"
+        << "+" << result.coins_added << " coins\n"
+        << "Total coins: " << result.total_coins;
+    MessageBoxA(g_gameWindow, msg.str().c_str(), "Purchase Complete", MB_OK | MB_ICONINFORMATION);
+
     return true;
 }
 
@@ -312,7 +415,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     bp.enable_pending_purchases = true;
     g_billing_client = std::make_unique<BillingClient>(bp);
 
+    // 先处理上次未消耗的购买（会在后端入账金币）
     ConsumeExistingPurchases();
+
+    // 查询最新金币余额（包含刚消耗的）
+    LOG("Querying coin balance from server...");
+    int coins = QueryCoinsFromServer();
+    if (coins >= 0) {
+        g_total_coins = coins;
+        std::ostringstream coin_log;
+        coin_log << "Current coin balance: " << g_total_coins;
+        LOG(coin_log.str().c_str());
+    } else {
+        LOG("WARNING: Failed to query coin balance from server.");
+    }
+
+    // 显示当前金币余额
+    std::ostringstream coin_msg;
+    coin_msg << "Current coins: " << g_total_coins << "\n\nProceed to purchase?";
+    if (MessageBoxA(NULL, coin_msg.str().c_str(), "Coin Balance", MB_YESNO | MB_ICONINFORMATION) != IDYES) {
+        g_billing_client.reset();
+        DestroyWindow(g_gameWindow);
+        return 0;
+    }
+
     int result = StartPurchaseFlow();
 
     g_billing_client.reset();

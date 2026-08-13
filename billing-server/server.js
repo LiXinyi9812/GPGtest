@@ -5,6 +5,7 @@ const { google } = require('googleapis');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
+const Database = require('better-sqlite3');
 
 const app = express();
 app.use(express.json());
@@ -17,6 +18,32 @@ const limiter = rateLimit({
   message: { error: 'Too many requests, please try again later.' },
 });
 app.use('/api/', limiter);
+
+// ============================================================
+// SQLite 数据库初始化 - 记录金币余额
+// ============================================================
+
+const db = new Database(path.join(__dirname, 'coins.db'));
+db.pragma('journal_mode = WAL');
+
+// 创建金币表 (单用户简化版，仅一行记录)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS wallet (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    coins INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
+// 确保有一行初始数据
+const initRow = db.prepare('INSERT OR IGNORE INTO wallet (id, coins) VALUES (1, 0)');
+initRow.run();
+
+// 预编译常用语句
+const getCoins = db.prepare('SELECT coins FROM wallet WHERE id = 1');
+const addCoins = db.prepare(`
+  UPDATE wallet SET coins = coins + ?, updated_at = datetime('now') WHERE id = 1
+`);
 
 // ============================================================
 // Google Play Developer API 初始化
@@ -76,6 +103,17 @@ app.get('/api/health', (req, res) => {
 });
 
 /**
+ * GET /api/coins
+ * Headers: x-api-key
+ *
+ * 查询当前金币余额
+ */
+app.get('/api/coins', authMiddleware, (req, res) => {
+  const row = getCoins.get();
+  res.json({ coins: row ? row.coins : 0 });
+});
+
+/**
  * POST /api/verify-and-consume
  * Body: { product_id, purchase_token }
  * Headers: x-api-key
@@ -105,9 +143,12 @@ app.post('/api/verify-and-consume', authMiddleware, async (req, res) => {
   // 幂等性校验: 防止重复处理
   if (processedTokens.has(purchase_token)) {
     console.log(`[WARN] Duplicate token received: ${purchase_token.substring(0, 20)}...`);
+    const currentCoins = getCoins.get().coins;
     return res.json({
       success: true,
       order_id: 'duplicate',
+      coins_added: 0,
+      total_coins: currentCoins,
       message: 'Already processed (idempotent).',
     });
   }
@@ -132,16 +173,16 @@ app.post('/api/verify-and-consume', authMiddleware, async (req, res) => {
       });
     }
 
-    // 第 2 步: 确认购买 (Acknowledge) - 防止自动退款
-    if (purchaseInfo.acknowledgementState === 0) {
-      console.log(`[ACK] Acknowledging purchase: ${purchaseInfo.orderId}`);
-      await playDeveloperApi.purchases.products.acknowledge({
-        packageName: PACKAGE_NAME,
-        productId: product_id,
-        token: purchase_token,
-      });
-      console.log(`[ACK] ✓ Purchase acknowledged`);
-    }
+    // 如果是非消耗型物品: 确认购买 (Acknowledge) - 防止自动退款
+    // if (purchaseInfo.acknowledgementState === 0) {
+    //   console.log(`[ACK] Acknowledging purchase: ${purchaseInfo.orderId}`);
+    //   await playDeveloperApi.purchases.products.acknowledge({
+    //     packageName: PACKAGE_NAME,
+    //     productId: product_id,
+    //     token: purchase_token,
+    //   });
+    //   console.log(`[ACK] ✓ Purchase acknowledged`);
+    // }
 
     // 第 3 步: 消耗购买 (Consume)
     console.log(`[CONSUME] Consuming purchase: ${purchaseInfo.orderId}`);
@@ -155,17 +196,20 @@ app.post('/api/verify-and-consume', authMiddleware, async (req, res) => {
     // 记录已处理的 token
     processedTokens.add(purchase_token);
 
-    console.log(`[SUCCESS] Purchase fully processed: orderId=${purchaseInfo.orderId}, product=${product_id}`);
+    // 发放金币: 每次购买 100_coins 增加 100 金币
+    const COINS_PER_PURCHASE = { '100_coins': 100 };
+    const coinsToAdd = COINS_PER_PURCHASE[product_id] || 100;
+    addCoins.run(coinsToAdd);
+    const newBalance = getCoins.get().coins;
 
-    // TODO: 在此处执行业务逻辑
-    // 1. 将购买记录写入数据库
-    // 2. 为用户发放权益 (如加金币)
-    // 3. 记录到审计日志
+    console.log(`[SUCCESS] Purchase fully processed: orderId=${purchaseInfo.orderId}, product=${product_id}, +${coinsToAdd} coins, balance=${newBalance}`);
 
     return res.json({
       success: true,
       order_id: purchaseInfo.orderId,
       purchase_time: purchaseInfo.purchaseTimeMillis,
+      coins_added: coinsToAdd,
+      total_coins: newBalance,
       message: 'Purchase verified, acknowledged and consumed successfully.',
     });
   } catch (error) {
