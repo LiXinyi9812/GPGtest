@@ -1,10 +1,13 @@
 #include <iostream>
 #include <sstream>
+#include <fstream>
 #include <future>
 #include <string>
 #include <memory>
 #include <chrono>
+#include <ctime>
 #include <vector>
+#include <mutex>
 #include <windows.h>
 #include <winhttp.h>
 #include <wincrypt.h>
@@ -15,6 +18,8 @@
 #include "billing/enums.h"
 #include "integrity/client.h"
 #include "integrity/models.h"
+#include "games/recall/client.h"
+#include "games/recall/models.h"
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "crypt32.lib")
@@ -25,19 +30,60 @@
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
+// ============================================================
+// 文件日志: 写入 exe 同目录的 game_log.txt，带时间戳
+// ============================================================
+static std::mutex g_log_mutex;
+
+static std::string GetLogFilePath() {
+    static std::string path;
+    if (path.empty()) {
+        // 写到 %LOCALAPPDATA%\CNPDCTest\game_log.txt，避免 Program Files 权限问题
+        char appData[MAX_PATH] = {};
+        if (GetEnvironmentVariableA("LOCALAPPDATA", appData, MAX_PATH) > 0) {
+            path = std::string(appData) + "\\CNPDCTest";
+            CreateDirectoryA(path.c_str(), NULL); // 不存在则创建，已存在不报错
+            path += "\\game_log.txt";
+        } else {
+            // fallback: 用 exe 同目录（开发环境）
+            char exePath[MAX_PATH] = {};
+            GetModuleFileNameA(NULL, exePath, MAX_PATH);
+            std::string dir(exePath);
+            size_t pos = dir.find_last_of("\\/");
+            if (pos != std::string::npos) dir = dir.substr(0, pos + 1);
+            path = dir + "game_log.txt";
+        }
+    }
+    return path;
+}
+
+static std::string GetTimestamp() {
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count() % 1000;
+    struct tm local_tm;
+    localtime_s(&local_tm, &time_t_now);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%02d-%02d %02d:%02d:%02d.%03d",
+        local_tm.tm_mon + 1, local_tm.tm_mday,
+        local_tm.tm_hour, local_tm.tm_min, local_tm.tm_sec, (int)ms);
+    return std::string(buf);
+}
+
 #define LOG(msg) do { \
-    auto now = std::chrono::system_clock::now(); \
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 100000; \
-    std::ostringstream oss; \
-    oss << "[" << ms << "][tid:" << GetCurrentThreadId() << "] "; \
-    oss << (msg); \
-    oss << "\n"; \
-    OutputDebugStringA(oss.str().c_str()); \
+    std::lock_guard<std::mutex> _lock(g_log_mutex); \
+    std::ofstream _logf(GetLogFilePath(), std::ios::app); \
+    if (_logf.is_open()) { \
+        _logf << "[" << GetTimestamp() << "] " << (msg) << "\n"; \
+    } \
+    OutputDebugStringA(("[LOG] " + std::string(msg) + "\n").c_str()); \
 } while(0)
 
 using namespace google::play::initialization;
 using namespace google::play::billing;
 using namespace google::play::integrity;
+using namespace google::play::games::recall;
 
 // ============================================================
 // 后端服务器配置
@@ -50,12 +96,14 @@ static const int64_t CLOUD_PROJECT_NUMBER = 177692096238; // TODO: 填入你的 
 
 std::unique_ptr<BillingClient> g_billing_client;
 std::unique_ptr<IntegrityClient> g_integrity_client;
+std::unique_ptr<GamesRecallClient> g_recall_client;
 std::unique_ptr<PrepareIntegrityTokenResultValue> g_prepare_value; // 缓存的预热结果
 bool g_integrity_ready = false;
 HWND g_gameWindow = nullptr;
 int g_total_coins = 0;  // 当前金币余额
 int g_total_score = 0;  // 当前分数
-std::string g_device_id; // 设备唯一ID (基于 Windows MachineGuid 生成)
+std::string g_account_id; // 账户唯一ID (通过 Recall 或手动输入)
+std::string g_recall_session_id; // Recall session ID
 
 // ============================================================
 // SHA256 工具函数 (用于生成 request_hash)
@@ -97,46 +145,323 @@ std::string ComputeSHA256(const std::string& data) {
 }
 
 // ============================================================
-// 设备唯一ID: 基于 Windows MachineGuid 生成稳定哈希
-// ============================================================
-
-std::string GetDeviceId() {
-    // 从注册表读取 MachineGuid (每台 Windows 安装唯一，重装系统才会变)
-    HKEY hKey = nullptr;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-        "SOFTWARE\\Microsoft\\Cryptography", 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
-        LOG("WARNING: Cannot open Cryptography registry key, using fallback.");
-        return ComputeSHA256("fallback-device-id");
-    }
-
-    char guidBuf[256] = {};
-    DWORD bufSize = sizeof(guidBuf);
-    DWORD type = 0;
-    LONG result = RegQueryValueExA(hKey, "MachineGuid", nullptr, &type,
-        (LPBYTE)guidBuf, &bufSize);
-    RegCloseKey(hKey);
-
-    if (result != ERROR_SUCCESS || type != REG_SZ) {
-        LOG("WARNING: Cannot read MachineGuid, using fallback.");
-        return ComputeSHA256("fallback-device-id");
-    }
-
-    // 对 MachineGuid 做 SHA256，作为设备ID (避免直接暴露原始 GUID)
-    std::string machineGuid(guidBuf);
-    std::string deviceId = ComputeSHA256("gpg-device:" + machineGuid);
-
-    std::ostringstream log_msg;
-    log_msg << "Device ID: " << deviceId.substr(0, 16) << "...";
-    LOG(log_msg.str().c_str());
-
-    return deviceId;
-}
-
-// ============================================================
 // 前向声明: 带消息泵的等待
 // ============================================================
 template<typename T>
 T WaitWithMessagePump(std::future<T>& future);
+
+// ============================================================
+// Recall 登录: 通过后端调用 Google Recall API
+// ============================================================
+
+/**
+ * 向后端 POST /api/recall/retrieve，查询是否已关联 account_id
+ * 返回 account_id (如果找到)，否则返回空字符串
+ */
+std::string RecallRetrieveFromServer(const std::string& recall_session_id) {
+    std::ostringstream json_body;
+    json_body << "{\"recall_session_id\":\"" << recall_session_id << "\"}";
+    std::string body = json_body.str();
+
+    HINTERNET hSession = WinHttpOpen(L"GPG-BillingClient/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return "";
+
+    HINTERNET hConnect = WinHttpConnect(hSession, BILLING_SERVER_HOST,
+        BILLING_SERVER_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return ""; }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST",
+        L"/api/recall/retrieve", NULL, WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return "";
+    }
+
+    std::wstring headers = L"Content-Type: application/json\r\n";
+    headers += L"x-api-key: ";
+    std::wstring wApiKey(API_SECRET_KEY, API_SECRET_KEY + strlen(API_SECRET_KEY));
+    headers += wApiKey;
+    headers += L"\r\n";
+
+    BOOL bResult = WinHttpSendRequest(hRequest, headers.c_str(),
+        (DWORD)headers.length(), (LPVOID)body.c_str(), (DWORD)body.length(),
+        (DWORD)body.length(), 0);
+
+    if (!bResult || !WinHttpReceiveResponse(hRequest, NULL)) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return "";
+    }
+
+    std::string response;
+    DWORD dwSize = 0, dwDownloaded = 0;
+    do {
+        WinHttpQueryDataAvailable(hRequest, &dwSize);
+        if (dwSize == 0) break;
+        std::vector<char> buffer(dwSize + 1, 0);
+        WinHttpReadData(hRequest, buffer.data(), dwSize, &dwDownloaded);
+        response.append(buffer.data(), dwDownloaded);
+    } while (dwSize > 0);
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    LOG(("RecallRetrieve response: " + response).c_str());
+
+    // 解析 {"found": true, "account_id": "..."}
+    if (response.find("\"found\":true") != std::string::npos ||
+        response.find("\"found\": true") != std::string::npos) {
+        std::string key = "\"account_id\":\"";
+        size_t pos = response.find(key);
+        if (pos == std::string::npos) {
+            key = "\"account_id\": \"";
+            pos = response.find(key);
+        }
+        if (pos != std::string::npos) {
+            pos += key.size();
+            size_t end = response.find("\"", pos);
+            if (end != std::string::npos) {
+                return response.substr(pos, end - pos);
+            }
+        }
+    }
+    return "";
+}
+
+/**
+ * 向后端 POST /api/recall/link，将 account_id 关联到当前 PGS 用户
+ * 返回 true 表示链接成功
+ */
+bool RecallLinkToServer(const std::string& recall_session_id, const std::string& account_id) {
+    std::ostringstream json_body;
+    json_body << "{\"recall_session_id\":\"" << recall_session_id
+              << "\",\"account_id\":\"" << account_id << "\"}";
+    std::string body = json_body.str();
+
+    HINTERNET hSession = WinHttpOpen(L"GPG-BillingClient/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return false;
+
+    HINTERNET hConnect = WinHttpConnect(hSession, BILLING_SERVER_HOST,
+        BILLING_SERVER_PORT, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST",
+        L"/api/recall/link", NULL, WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    std::wstring headers = L"Content-Type: application/json\r\n";
+    headers += L"x-api-key: ";
+    std::wstring wApiKey(API_SECRET_KEY, API_SECRET_KEY + strlen(API_SECRET_KEY));
+    headers += wApiKey;
+    headers += L"\r\n";
+
+    BOOL bResult = WinHttpSendRequest(hRequest, headers.c_str(),
+        (DWORD)headers.length(), (LPVOID)body.c_str(), (DWORD)body.length(),
+        (DWORD)body.length(), 0);
+
+    if (!bResult || !WinHttpReceiveResponse(hRequest, NULL)) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    DWORD statusCode = 0;
+    DWORD statusCodeSize = sizeof(statusCode);
+    WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusCodeSize,
+        WINHTTP_NO_HEADER_INDEX);
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    LOG(statusCode == 200 ? "RecallLink: SUCCESS" : "RecallLink: FAILED");
+    return statusCode == 200;
+}
+
+/**
+ * 显示输入 account_id 的对话框
+ * 返回用户输入的 account_id，取消则返回空
+ */
+std::string ShowLoginDialog(HWND parent) {
+    // 使用简单的输入对话框 (TaskDialog 不支持输入，用自定义对话框)
+    static char inputBuffer[256] = {};
+    inputBuffer[0] = '\0';
+
+    // 创建模态对话框模板 (内存中)
+    struct {
+        DLGTEMPLATE tmpl;
+        WORD menu, wndClass, title;
+        // 接下来是控件
+    } dlgBase;
+
+    // 用 MessageBox 先提示，再用简易方法获取输入
+    // 实际使用 GetOpenFileName 风格的简单输入:
+    // 这里用一个小技巧 - 创建一个临时窗口做输入
+
+    HWND hDlg = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+        L"STATIC", L"Login - Enter Account ID",
+        WS_VISIBLE | WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 420, 180,
+        parent, NULL, GetModuleHandle(NULL), NULL);
+
+    if (!hDlg) return "";
+
+    // 标签
+    CreateWindowExW(0, L"STATIC", L"Enter your Account ID (hex):",
+        WS_CHILD | WS_VISIBLE,
+        20, 20, 360, 25, hDlg, NULL, GetModuleHandle(NULL), NULL);
+
+    // 输入框
+    HWND hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        20, 50, 360, 25, hDlg, (HMENU)101, GetModuleHandle(NULL), NULL);
+
+    // OK 按钮
+    HWND hOk = CreateWindowExW(0, L"BUTTON", L"Login",
+        WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+        120, 100, 80, 30, hDlg, (HMENU)IDOK, GetModuleHandle(NULL), NULL);
+
+    // Cancel 按钮
+    HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Exit",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        220, 100, 80, 30, hDlg, (HMENU)IDCANCEL, GetModuleHandle(NULL), NULL);
+
+    SetFocus(hEdit);
+    EnableWindow(parent, FALSE);
+
+    std::string result;
+    MSG msg;
+    bool dialogRunning = true;
+
+    while (dialogRunning && GetMessage(&msg, NULL, 0, 0)) {
+        if (msg.message == WM_COMMAND) {
+            WORD cmd = LOWORD(msg.wParam);
+            if (cmd == IDOK) {
+                char buf[256] = {};
+                GetWindowTextA(hEdit, buf, sizeof(buf));
+                result = buf;
+                dialogRunning = false;
+            } else if (cmd == IDCANCEL) {
+                dialogRunning = false;
+            }
+        }
+        // 也处理窗口关闭
+        if (msg.message == WM_CLOSE && msg.hwnd == hDlg) {
+            dialogRunning = false;
+        }
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    EnableWindow(parent, TRUE);
+    DestroyWindow(hDlg);
+
+    // 校验格式: 非空十六进制
+    if (result.empty()) return "";
+    for (char c : result) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+            return "";
+        }
+    }
+    return result;
+}
+
+/**
+ * Recall 登录流程:
+ * 1. RequestRecallAccess 获取 session_id
+ * 2. 调用后端 retrieveTokens 查询已关联账户
+ * 3. 如果有 → 自动登录
+ * 4. 如果没有 → 弹出输入框让用户输入 account_id → linkPersona
+ * 返回 true 表示登录成功
+ */
+bool PerformRecallLogin() {
+    LOG("Starting Recall login flow...");
+
+    // Step 1: 请求 Recall Access
+    auto promise = std::make_shared<std::promise<RequestRecallAccessResult>>();
+    auto future = promise->get_future();
+    g_recall_client->RequestRecallAccess(
+        [promise](RequestRecallAccessResult result) {
+            promise->set_value(std::move(result));
+        });
+
+    auto recall_result = WaitWithMessagePump(future);
+    if (!recall_result.ok()) {
+        std::ostringstream log_msg;
+        log_msg << "ERROR: RequestRecallAccess failed, code=" << static_cast<int>(recall_result.code())
+                << ", message=" << recall_result.error_message();
+        LOG(log_msg.str().c_str());
+
+        std::string errText = "Failed to connect to Google Play Games.\n\nError: " + recall_result.error_message();
+        MessageBoxA(g_gameWindow, errText.c_str(), "Login Error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    g_recall_session_id = recall_result.value().recall_session_id;
+    LOG(("Recall session ID obtained: " + g_recall_session_id.substr(0, 20) + "...").c_str());
+
+    // Step 2: 调用后端查询已关联账户
+    std::string linked_account = RecallRetrieveFromServer(g_recall_session_id);
+
+    if (!linked_account.empty()) {
+        // 自动登录成功
+        g_account_id = linked_account;
+        std::ostringstream log_msg;
+        log_msg << "Auto-login successful! Account: " << g_account_id.substr(0, 16) << "...";
+        LOG(log_msg.str().c_str());
+
+        MessageBoxA(g_gameWindow,
+            "Auto-login successful!\nYour account has been restored via Google Play Games.",
+            "Welcome Back", MB_OK | MB_ICONINFORMATION);
+        return true;
+    }
+
+    // Step 3: 没有关联账户，需要用户手动输入
+    LOG("No linked account found. Prompting user for login...");
+
+    std::string input_account = ShowLoginDialog(g_gameWindow);
+    if (input_account.empty()) {
+        LOG("User cancelled login.");
+        return false;
+    }
+
+    g_account_id = input_account;
+
+    // Step 4: 将输入的 account_id 关联到 PGS 用户
+    LOG("Linking account to PGS user...");
+    bool linkOk = RecallLinkToServer(g_recall_session_id, g_account_id);
+    if (linkOk) {
+        MessageBoxA(g_gameWindow,
+            "Login successful!\nYour account is now linked to Google Play Games.\nNext time you can login automatically.",
+            "Login Complete", MB_OK | MB_ICONINFORMATION);
+    } else {
+        // 链接失败但仍允许继续游戏 (下次需要重新输入)
+        MessageBoxA(g_gameWindow,
+            "Login successful, but account linking failed.\nYou may need to login again next time.",
+            "Warning", MB_OK | MB_ICONWARNING);
+    }
+
+    std::ostringstream log_msg;
+    log_msg << "Login complete. Account: " << g_account_id.substr(0, 16) << "...";
+    LOG(log_msg.str().c_str());
+    return true;
+}
 
 // ============================================================
 // Play Integrity: 预热 & 请求令牌
@@ -232,16 +557,16 @@ int QueryCoinsFromServer() {
         return -1;
     }
 
-    // 设置鉴权头 + 设备ID头 + Integrity 头
+    // 设置鉴权头 + 账户ID头 + Integrity 头
     std::wstring headers = L"x-api-key: ";
     std::wstring wApiKey(API_SECRET_KEY, API_SECRET_KEY + strlen(API_SECRET_KEY));
     headers += wApiKey;
     headers += L"\r\n";
 
-    // 设备ID
-    headers += L"x-device-id: ";
-    std::wstring wDeviceId(g_device_id.begin(), g_device_id.end());
-    headers += wDeviceId;
+    // 账户ID
+    headers += L"x-account-id: ";
+    std::wstring wAccountId(g_account_id.begin(), g_account_id.end());
+    headers += wAccountId;
     headers += L"\r\n";
 
     // 添加完整性令牌头
@@ -320,14 +645,14 @@ int QueryScoreFromServer() {
         return -1;
     }
 
-    // 设置鉴权头 + 设备ID头
+    // 设置鉴权头 + 账户ID头
     std::wstring headers = L"x-api-key: ";
     std::wstring wApiKey(API_SECRET_KEY, API_SECRET_KEY + strlen(API_SECRET_KEY));
     headers += wApiKey;
     headers += L"\r\n";
-    headers += L"x-device-id: ";
-    std::wstring wDeviceId(g_device_id.begin(), g_device_id.end());
-    headers += wDeviceId;
+    headers += L"x-account-id: ";
+    std::wstring wAccountId(g_account_id.begin(), g_account_id.end());
+    headers += wAccountId;
     headers += L"\r\n";
 
     BOOL bResult = WinHttpSendRequest(hRequest, headers.c_str(),
@@ -423,15 +748,15 @@ ServerVerifyResult VerifyPurchaseWithServer(const std::string& product_id,
         return result;
     }
 
-    // 设置请求头 (含 设备ID + Integrity 令牌)
+    // 设置请求头 (含 账户ID + Integrity 令牌)
     std::wstring headers = L"Content-Type: application/json\r\n";
     headers += L"x-api-key: ";
     std::wstring wApiKey(API_SECRET_KEY, API_SECRET_KEY + strlen(API_SECRET_KEY));
     headers += wApiKey;
     headers += L"\r\n";
-    headers += L"x-device-id: ";
-    std::wstring wDeviceId(g_device_id.begin(), g_device_id.end());
-    headers += wDeviceId;
+    headers += L"x-account-id: ";
+    std::wstring wAccountId(g_account_id.begin(), g_account_id.end());
+    headers += wAccountId;
     headers += L"\r\n";
 
     // 添加完整性令牌头
@@ -710,15 +1035,15 @@ AddScoreResult AddScoreToServer(int addscore) {
         return result;
     }
 
-    // 设置请求头 (含 设备ID + Integrity 令牌)
+    // 设置请求头 (含 账户ID + Integrity 令牌)
     std::wstring headers = L"Content-Type: application/json\r\n";
     headers += L"x-api-key: ";
     std::wstring wApiKey(API_SECRET_KEY, API_SECRET_KEY + strlen(API_SECRET_KEY));
     headers += wApiKey;
     headers += L"\r\n";
-    headers += L"x-device-id: ";
-    std::wstring wDeviceId(g_device_id.begin(), g_device_id.end());
-    headers += wDeviceId;
+    headers += L"x-account-id: ";
+    std::wstring wAccountId(g_account_id.begin(), g_account_id.end());
+    headers += wAccountId;
     headers += L"\r\n";
 
     if (!integrity_token.empty()) {
@@ -823,10 +1148,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
     LOG("SDK initialized.");
 
-    // 生成设备唯一ID (基于本机 MachineGuid，一经生成不会变)
-    g_device_id = GetDeviceId();
-    if (g_device_id.empty()) {
-        LOG("FATAL: Failed to generate device ID.");
+    // 初始化 GamesRecallClient (必须在 SDK 初始化后构造)
+    g_recall_client = std::make_unique<GamesRecallClient>();
+
+    // 通过 Recall 流程登录 (替代原有的 config 文件读取)
+    if (!PerformRecallLogin()) {
+        LOG("Login failed or cancelled. Exiting.");
+        DestroyWindow(g_gameWindow);
         return 1;
     }
 
@@ -920,6 +1248,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
 
     g_billing_client.reset();
+    g_recall_client.reset();
     DestroyWindow(g_gameWindow);
     return 0;
 }

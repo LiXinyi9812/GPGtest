@@ -10,6 +10,7 @@ const path = require('path');
 const { setIntegrityAuthClient } = require('./middleware/integrity');
 const { router: purchaseRouter, setPlayDeveloperApi } = require('./routes/purchase');
 const scoreRouter = require('./routes/score');
+const { router: recallRouter, setGamesAuthClient } = require('./routes/recall');
 
 const app = express();
 
@@ -44,6 +45,7 @@ async function initGoogleApi() {
     scopes: [
       'https://www.googleapis.com/auth/androidpublisher',
       'https://www.googleapis.com/auth/playintegrity',
+      'https://www.googleapis.com/auth/games',
     ],
   });
 
@@ -57,9 +59,11 @@ async function initGoogleApi() {
 
   const integrityAuthClient = await auth.getClient();
   setIntegrityAuthClient(integrityAuthClient);
+  setGamesAuthClient(integrityAuthClient);
 
   console.log('[Billing Server] Google Play API initialized.');
   console.log('[Billing Server] Play Integrity API initialized (REST mode for PC).');
+  console.log('[Billing Server] Recall API initialized.');
 }
 
 // ============================================================
@@ -76,6 +80,9 @@ app.use('/api', purchaseRouter);
 
 // 分数相关路由
 app.use('/api', scoreRouter);
+
+// Recall 相关路由
+app.use('/api', recallRouter);
 
 // ============================================================
 // 启动服务器
