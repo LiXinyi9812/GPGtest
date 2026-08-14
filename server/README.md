@@ -91,3 +91,16 @@ npm start
 - `API_SECRET_KEY` 要保密，不要提交到代码库
 - 生产环境中 `processedTokens` 应替换为数据库存储
 - 建议部署时添加防火墙，仅允许游戏客户端 IP 访问
+
+
+## Structure
+billing-server/
+├── server.js                  ← 入口：Express 配置 + Google API 初始化 + 路由挂载
+├── db.js                      ← 数据库：SQLite 建表 + 预编译查询
+├── middleware/
+│   ├── auth.js                ← 鉴权：x-api-key 校验
+│   └── integrity.js           ← Integrity：Play Integrity 令牌验证 + 两种中间件
+└── routes/
+    ├── purchase.js            ← 购买：/api/coins, /api/verify-and-consume
+    └── score.js               ← 分数：/api/score, /api/add-score
+

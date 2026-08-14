@@ -3,5 +3,8 @@
     <Application>
         <PackageName>com.dynasty.cnpdctest</PackageName>
         <IsDeveloperMode>false</IsDeveloperMode>
+        <PlayGamesServices>
+          <ProjectId>8722392204858376488</ProjectId>
+        </PlayGamesServices>
     </Application>
 </Manifest>
