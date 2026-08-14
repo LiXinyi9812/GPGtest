@@ -1,5 +1,6 @@
 const express = require('express');
 const authMiddleware = require('../middleware/auth');
+const deviceIdMiddleware = require('../middleware/deviceId');
 const { getCoins, addCoins } = require('../db');
 
 const router = express.Router();
@@ -22,19 +23,21 @@ function setPlayDeveloperApi(api) {
 
 /**
  * GET /api/coins
- * 查询当前金币余额
+ * 查询当前金币余额 (按设备ID)
  */
-router.get('/coins', authMiddleware, (req, res) => {
-  const row = getCoins.get();
+router.get('/coins', authMiddleware, deviceIdMiddleware, (req, res) => {
+  const row = getCoins.get(req.deviceId);
   res.json({ coins: row ? row.coins : 0 });
 });
 
 /**
  * POST /api/verify-and-consume
  * 验证购买、确认 (acknowledge) 并消耗 (consume)
+ * 金币入账到对应设备ID
  */
-router.post('/verify-and-consume', authMiddleware, async (req, res) => {
+router.post('/verify-and-consume', authMiddleware, deviceIdMiddleware, async (req, res) => {
   const { product_id, purchase_token } = req.body;
+  const deviceId = req.deviceId;
 
   // 参数校验
   if (!product_id || !purchase_token) {
@@ -43,8 +46,7 @@ router.post('/verify-and-consume', authMiddleware, async (req, res) => {
     });
   }
 
-  console.log(`[REQUEST] 收到购买请求 - 产品ID: ${product_id}, Token: ${purchase_token.substring(0, 30)}...`);
-  console.log(`[REQUEST] 完整请求体:`, JSON.stringify(req.body, null, 2));
+  console.log(`[REQUEST] 收到购买请求 - 设备: ${deviceId.substring(0, 16)}..., 产品ID: ${product_id}, Token: ${purchase_token.substring(0, 30)}...`);
 
   // 商品 ID 白名单校验
   if (!ALLOWED_PRODUCT_IDS.includes(product_id)) {
@@ -54,7 +56,8 @@ router.post('/verify-and-consume', authMiddleware, async (req, res) => {
   // 幂等性校验: 防止重复处理
   if (processedTokens.has(purchase_token)) {
     console.log(`[WARN] Duplicate token received: ${purchase_token.substring(0, 20)}...`);
-    const currentCoins = getCoins.get().coins;
+    const row = getCoins.get(deviceId);
+    const currentCoins = row ? row.coins : 0;
     return res.json({
       success: true,
       order_id: 'duplicate',
@@ -96,13 +99,13 @@ router.post('/verify-and-consume', authMiddleware, async (req, res) => {
     // 记录已处理的 token
     processedTokens.add(purchase_token);
 
-    // 发放金币
+    // 发放金币 (入账到对应设备ID)
     const COINS_PER_PURCHASE = { '100_coins': 100 };
     const coinsToAdd = COINS_PER_PURCHASE[product_id] || 100;
-    addCoins.run(coinsToAdd);
-    const newBalance = getCoins.get().coins;
+    addCoins.run(deviceId, coinsToAdd);
+    const newBalance = getCoins.get(deviceId).coins;
 
-    console.log(`[SUCCESS] Purchase fully processed: orderId=${purchaseInfo.orderId}, product=${product_id}, +${coinsToAdd} coins, balance=${newBalance}`);
+    console.log(`[SUCCESS] Purchase processed: device=${deviceId.substring(0, 16)}..., orderId=${purchaseInfo.orderId}, +${coinsToAdd} coins, balance=${newBalance}`);
 
     return res.json({
       success: true,

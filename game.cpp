@@ -55,6 +55,7 @@ bool g_integrity_ready = false;
 HWND g_gameWindow = nullptr;
 int g_total_coins = 0;  // 当前金币余额
 int g_total_score = 0;  // 当前分数
+std::string g_device_id; // 设备唯一ID (基于 Windows MachineGuid 生成)
 
 // ============================================================
 // SHA256 工具函数 (用于生成 request_hash)
@@ -93,6 +94,42 @@ std::string ComputeSHA256(const std::string& data) {
     CryptDestroyHash(hHash);
     CryptReleaseContext(hProv, 0);
     return result;
+}
+
+// ============================================================
+// 设备唯一ID: 基于 Windows MachineGuid 生成稳定哈希
+// ============================================================
+
+std::string GetDeviceId() {
+    // 从注册表读取 MachineGuid (每台 Windows 安装唯一，重装系统才会变)
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+        "SOFTWARE\\Microsoft\\Cryptography", 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
+        LOG("WARNING: Cannot open Cryptography registry key, using fallback.");
+        return ComputeSHA256("fallback-device-id");
+    }
+
+    char guidBuf[256] = {};
+    DWORD bufSize = sizeof(guidBuf);
+    DWORD type = 0;
+    LONG result = RegQueryValueExA(hKey, "MachineGuid", nullptr, &type,
+        (LPBYTE)guidBuf, &bufSize);
+    RegCloseKey(hKey);
+
+    if (result != ERROR_SUCCESS || type != REG_SZ) {
+        LOG("WARNING: Cannot read MachineGuid, using fallback.");
+        return ComputeSHA256("fallback-device-id");
+    }
+
+    // 对 MachineGuid 做 SHA256，作为设备ID (避免直接暴露原始 GUID)
+    std::string machineGuid(guidBuf);
+    std::string deviceId = ComputeSHA256("gpg-device:" + machineGuid);
+
+    std::ostringstream log_msg;
+    log_msg << "Device ID: " << deviceId.substr(0, 16) << "...";
+    LOG(log_msg.str().c_str());
+
+    return deviceId;
 }
 
 // ============================================================
@@ -195,10 +232,16 @@ int QueryCoinsFromServer() {
         return -1;
     }
 
-    // 设置鉴权头 + Integrity 头
+    // 设置鉴权头 + 设备ID头 + Integrity 头
     std::wstring headers = L"x-api-key: ";
     std::wstring wApiKey(API_SECRET_KEY, API_SECRET_KEY + strlen(API_SECRET_KEY));
     headers += wApiKey;
+    headers += L"\r\n";
+
+    // 设备ID
+    headers += L"x-device-id: ";
+    std::wstring wDeviceId(g_device_id.begin(), g_device_id.end());
+    headers += wDeviceId;
     headers += L"\r\n";
 
     // 添加完整性令牌头
@@ -277,10 +320,14 @@ int QueryScoreFromServer() {
         return -1;
     }
 
-    // 设置鉴权头
+    // 设置鉴权头 + 设备ID头
     std::wstring headers = L"x-api-key: ";
     std::wstring wApiKey(API_SECRET_KEY, API_SECRET_KEY + strlen(API_SECRET_KEY));
     headers += wApiKey;
+    headers += L"\r\n";
+    headers += L"x-device-id: ";
+    std::wstring wDeviceId(g_device_id.begin(), g_device_id.end());
+    headers += wDeviceId;
     headers += L"\r\n";
 
     BOOL bResult = WinHttpSendRequest(hRequest, headers.c_str(),
@@ -376,11 +423,15 @@ ServerVerifyResult VerifyPurchaseWithServer(const std::string& product_id,
         return result;
     }
 
-    // 设置请求头 (含 Integrity 令牌)
+    // 设置请求头 (含 设备ID + Integrity 令牌)
     std::wstring headers = L"Content-Type: application/json\r\n";
     headers += L"x-api-key: ";
     std::wstring wApiKey(API_SECRET_KEY, API_SECRET_KEY + strlen(API_SECRET_KEY));
     headers += wApiKey;
+    headers += L"\r\n";
+    headers += L"x-device-id: ";
+    std::wstring wDeviceId(g_device_id.begin(), g_device_id.end());
+    headers += wDeviceId;
     headers += L"\r\n";
 
     // 添加完整性令牌头
@@ -659,11 +710,15 @@ AddScoreResult AddScoreToServer(int addscore) {
         return result;
     }
 
-    // 设置请求头 (含 Integrity 令牌)
+    // 设置请求头 (含 设备ID + Integrity 令牌)
     std::wstring headers = L"Content-Type: application/json\r\n";
     headers += L"x-api-key: ";
     std::wstring wApiKey(API_SECRET_KEY, API_SECRET_KEY + strlen(API_SECRET_KEY));
     headers += wApiKey;
+    headers += L"\r\n";
+    headers += L"x-device-id: ";
+    std::wstring wDeviceId(g_device_id.begin(), g_device_id.end());
+    headers += wDeviceId;
     headers += L"\r\n";
 
     if (!integrity_token.empty()) {
@@ -767,6 +822,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         return 1;
     }
     LOG("SDK initialized.");
+
+    // 生成设备唯一ID (基于本机 MachineGuid，一经生成不会变)
+    g_device_id = GetDeviceId();
+    if (g_device_id.empty()) {
+        LOG("FATAL: Failed to generate device ID.");
+        return 1;
+    }
 
     // 初始化 IntegrityClient (必须在 SDK 初始化后构造)
     g_integrity_client = std::make_unique<IntegrityClient>();

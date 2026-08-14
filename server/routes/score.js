@@ -1,5 +1,6 @@
 const express = require('express');
 const authMiddleware = require('../middleware/auth');
+const deviceIdMiddleware = require('../middleware/deviceId');
 const { integrityWithServerHashMiddleware } = require('../middleware/integrity');
 const { getScore, addScore } = require('../db');
 
@@ -7,25 +8,26 @@ const router = express.Router();
 
 /**
  * GET /api/score
- * 查询当前分数
+ * 查询当前分数 (按设备ID)
  */
-router.get('/score', authMiddleware, (req, res) => {
-  const row = getScore.get();
+router.get('/score', authMiddleware, deviceIdMiddleware, (req, res) => {
+  const row = getScore.get(req.deviceId);
   res.json({ score: row ? row.score : 0 });
 });
 
 /**
  * POST /api/add-score
  * Body: { addscore: <int>, timestamp: <int> }
- * Headers: x-api-key, x-integrity-token
+ * Headers: x-api-key, x-device-id, x-integrity-token
  *
- * 给数据库中的 score 增加 addscore 分
+ * 给该设备ID的 score 增加 addscore 分
  * 受 Play Integrity 中间件保护 (服务端自行计算 request hash)
  */
-router.post('/add-score', authMiddleware, integrityWithServerHashMiddleware, (req, res) => {
+router.post('/add-score', authMiddleware, deviceIdMiddleware, integrityWithServerHashMiddleware, (req, res) => {
   const { addscore, timestamp } = req.body;
+  const deviceId = req.deviceId;
 
-  console.log(`[SCORE] Received add-score request body:`, JSON.stringify(req.body));
+  console.log(`[SCORE] Received add-score request: device=${deviceId.substring(0, 16)}..., body:`, JSON.stringify(req.body));
 
   if (addscore == null || !Number.isInteger(addscore) || addscore <= 0) {
     return res.status(400).json({ error: 'Invalid addscore: must be a positive integer.' });
@@ -42,10 +44,11 @@ router.post('/add-score', authMiddleware, integrityWithServerHashMiddleware, (re
     return res.status(403).json({ error: 'Request expired or timestamp invalid.' });
   }
 
-  addScore.run(addscore);
-  const newScore = getScore.get().score;
+  addScore.run(deviceId, addscore);
+  const row = getScore.get(deviceId);
+  const newScore = row ? row.score : 0;
 
-  console.log(`[SCORE] Added ${addscore} points, new score: ${newScore}`);
+  console.log(`[SCORE] Device ${deviceId.substring(0, 16)}... added ${addscore} points, new score: ${newScore}`);
   return res.json({ success: true, score_added: addscore, total_score: newScore });
 });
 
