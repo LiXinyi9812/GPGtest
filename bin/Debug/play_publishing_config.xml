@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <play-publishing-config version="1.0">
   <application>
-    <package-name>com.dynasty.cnpdctest</package-name>
-    <version-name>0.0.8</version-name>
+    <package-name>com.leatestgps</package-name>
+    <version-name>1.0.0</version-name>
   </application>
-  <installer requiresElevation="true" acceptsCommandLineArguments="false">
+  <installer requiresElevation="false" acceptsCommandLineArguments="false">
     <path>GPGInstaller.exe</path>
     <installation-path-registry-location>
       <key-name>Software\Microsoft\Windows\CurrentVersion\Uninstall\GPG Application</key-name>

@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Manifest version="1">
     <Application>
-        <PackageName>com.dynasty.cnpdctest</PackageName>
-        <IsDeveloperMode>false</IsDeveloperMode>
+        <PackageName>com.leatestgps</PackageName>
+        <IsDeveloperMode>true</IsDeveloperMode>
         <PlayGamesServices>
-          <ProjectId>8722392204858376488</ProjectId>
+          <ProjectId>177692096238</ProjectId>
         </PlayGamesServices>
     </Application>
 </Manifest>

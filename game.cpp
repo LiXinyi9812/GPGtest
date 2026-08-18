@@ -13,11 +13,12 @@
 #include <wincrypt.h>
 #include <commctrl.h>
 #include "initialization/initialization.h"
-#include "billing/client.h"
-#include "billing/models.h"
-#include "billing/enums.h"
-#include "integrity/client.h"
-#include "integrity/models.h"
+// [DISABLED] Purchase/Integrity - not needed, focus on Recall API
+// #include "billing/client.h"
+// #include "billing/models.h"
+// #include "billing/enums.h"
+// #include "integrity/client.h"
+// #include "integrity/models.h"
 #include "games/recall/client.h"
 #include "games/recall/models.h"
 
@@ -41,7 +42,7 @@ static std::string GetLogFilePath() {
         // 写到 %LOCALAPPDATA%\CNPDCTest\game_log.txt，避免 Program Files 权限问题
         char appData[MAX_PATH] = {};
         if (GetEnvironmentVariableA("LOCALAPPDATA", appData, MAX_PATH) > 0) {
-            path = std::string(appData) + "\\CNPDCTest";
+            path = std::string(appData) + "\\RecallApiTest";
             CreateDirectoryA(path.c_str(), NULL); // 不存在则创建，已存在不报错
             path += "\\game_log.txt";
         } else {
@@ -81,8 +82,9 @@ static std::string GetTimestamp() {
 } while(0)
 
 using namespace google::play::initialization;
-using namespace google::play::billing;
-using namespace google::play::integrity;
+// [DISABLED] Purchase/Integrity - not needed, focus on Recall API
+// using namespace google::play::billing;
+// using namespace google::play::integrity;
 using namespace google::play::games::recall;
 
 // ============================================================
@@ -91,14 +93,16 @@ using namespace google::play::games::recall;
 static const wchar_t* BILLING_SERVER_HOST = L"localhost";
 static const int BILLING_SERVER_PORT = 3000;
 static const char* API_SECRET_KEY = "gpg_billing_secret_key_2024";
-static const char* PRODUCT_ID = "100_coins";
-static const int64_t CLOUD_PROJECT_NUMBER = 177692096238; // TODO: 填入你的 Google Cloud 项目编号
+// [DISABLED] Purchase/Integrity - not needed, focus on Recall API
+// static const char* PRODUCT_ID = "100_coins";
+// static const int64_t CLOUD_PROJECT_NUMBER = 177692096238;
 
-std::unique_ptr<BillingClient> g_billing_client;
-std::unique_ptr<IntegrityClient> g_integrity_client;
+// [DISABLED] Purchase/Integrity clients
+// std::unique_ptr<BillingClient> g_billing_client;
+// std::unique_ptr<IntegrityClient> g_integrity_client;
 std::unique_ptr<GamesRecallClient> g_recall_client;
-std::unique_ptr<PrepareIntegrityTokenResultValue> g_prepare_value; // 缓存的预热结果
-bool g_integrity_ready = false;
+// std::unique_ptr<PrepareIntegrityTokenResultValue> g_prepare_value;
+// bool g_integrity_ready = false;
 HWND g_gameWindow = nullptr;
 int g_total_coins = 0;  // 当前金币余额
 int g_total_score = 0;  // 当前分数
@@ -106,9 +110,9 @@ std::string g_account_id; // 账户唯一ID (通过 Recall 或手动输入)
 std::string g_recall_session_id; // Recall session ID
 
 // ============================================================
-// SHA256 工具函数 (用于生成 request_hash)
+// [DISABLED] SHA256 工具函数 - Purchase/Integrity not needed
 // ============================================================
-
+/*
 std::string ComputeSHA256(const std::string& data) {
     HCRYPTPROV hProv = 0;
     HCRYPTHASH hHash = 0;
@@ -143,6 +147,7 @@ std::string ComputeSHA256(const std::string& data) {
     CryptReleaseContext(hProv, 0);
     return result;
 }
+*/
 
 // ============================================================
 // 前向声明: 带消息泵的等待
@@ -297,25 +302,56 @@ bool RecallLinkToServer(const std::string& recall_session_id, const std::string&
  * 显示输入 account_id 的对话框
  * 返回用户输入的 account_id，取消则返回空
  */
+// Login 对话框状态 (通过 GWLP_USERDATA 传递给 WndProc)
+struct LoginDialogState {
+    HWND hEdit;
+    bool done;
+    std::string result;
+};
+
+static LRESULT CALLBACK LoginDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    LoginDialogState* state = reinterpret_cast<LoginDialogState*>(
+        GetWindowLongPtr(hwnd, GWLP_USERDATA));
+
+    switch (msg) {
+    case WM_COMMAND: {
+        WORD cmd = LOWORD(wParam);
+        if (cmd == IDOK && state) {
+            char buf[256] = {};
+            GetWindowTextA(state->hEdit, buf, sizeof(buf));
+            state->result = buf;
+            state->done = true;
+        } else if (cmd == IDCANCEL && state) {
+            state->done = true;
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        if (state) state->done = true;
+        return 0;
+    default:
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+}
+
 std::string ShowLoginDialog(HWND parent) {
-    // 使用简单的输入对话框 (TaskDialog 不支持输入，用自定义对话框)
-    static char inputBuffer[256] = {};
-    inputBuffer[0] = '\0';
-
-    // 创建模态对话框模板 (内存中)
-    struct {
-        DLGTEMPLATE tmpl;
-        WORD menu, wndClass, title;
-        // 接下来是控件
-    } dlgBase;
-
-    // 用 MessageBox 先提示，再用简易方法获取输入
-    // 实际使用 GetOpenFileName 风格的简单输入:
-    // 这里用一个小技巧 - 创建一个临时窗口做输入
+    // 注册自定义窗口类 (只注册一次)
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wcDlg = {};
+        wcDlg.cbSize = sizeof(WNDCLASSEXW);
+        wcDlg.lpfnWndProc = LoginDlgProc;
+        wcDlg.hInstance = GetModuleHandle(NULL);
+        wcDlg.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wcDlg.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wcDlg.lpszClassName = L"GPGLoginDialog";
+        RegisterClassExW(&wcDlg);
+        registered = true;
+    }
 
     HWND hDlg = CreateWindowExW(
         WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
-        L"STATIC", L"Login - Enter Account ID",
+        L"GPGLoginDialog", L"Login - Enter Account ID",
         WS_VISIBLE | WS_POPUP | WS_CAPTION | WS_SYSMENU,
         CW_USEDEFAULT, CW_USEDEFAULT, 420, 180,
         parent, NULL, GetModuleHandle(NULL), NULL);
@@ -333,53 +369,44 @@ std::string ShowLoginDialog(HWND parent) {
         20, 50, 360, 25, hDlg, (HMENU)101, GetModuleHandle(NULL), NULL);
 
     // OK 按钮
-    HWND hOk = CreateWindowExW(0, L"BUTTON", L"Login",
+    CreateWindowExW(0, L"BUTTON", L"Login",
         WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
         120, 100, 80, 30, hDlg, (HMENU)IDOK, GetModuleHandle(NULL), NULL);
 
     // Cancel 按钮
-    HWND hCancel = CreateWindowExW(0, L"BUTTON", L"Exit",
+    CreateWindowExW(0, L"BUTTON", L"Exit",
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
         220, 100, 80, 30, hDlg, (HMENU)IDCANCEL, GetModuleHandle(NULL), NULL);
+
+    // 设置状态并关联到窗口
+    LoginDialogState state = { hEdit, false, "" };
+    SetWindowLongPtr(hDlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&state));
 
     SetFocus(hEdit);
     EnableWindow(parent, FALSE);
 
-    std::string result;
+    // 消息循环 (使用 PeekMessage 避免 GetMessage 阻塞导致无法退出)
     MSG msg;
-    bool dialogRunning = true;
-
-    while (dialogRunning && GetMessage(&msg, NULL, 0, 0)) {
-        if (msg.message == WM_COMMAND) {
-            WORD cmd = LOWORD(msg.wParam);
-            if (cmd == IDOK) {
-                char buf[256] = {};
-                GetWindowTextA(hEdit, buf, sizeof(buf));
-                result = buf;
-                dialogRunning = false;
-            } else if (cmd == IDCANCEL) {
-                dialogRunning = false;
-            }
+    while (!state.done) {
+        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+            if (state.done) break;
         }
-        // 也处理窗口关闭
-        if (msg.message == WM_CLOSE && msg.hwnd == hDlg) {
-            dialogRunning = false;
-        }
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        if (!state.done) Sleep(10);
     }
 
     EnableWindow(parent, TRUE);
     DestroyWindow(hDlg);
 
     // 校验格式: 非空十六进制
-    if (result.empty()) return "";
-    for (char c : result) {
+    if (state.result.empty()) return "";
+    for (char c : state.result) {
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
             return "";
         }
     }
-    return result;
+    return state.result;
 }
 
 /**
@@ -464,9 +491,9 @@ bool PerformRecallLogin() {
 }
 
 // ============================================================
-// Play Integrity: 预热 & 请求令牌
+// [DISABLED] Play Integrity: 预热 & 请求令牌 - not needed, focus on Recall API
 // ============================================================
-
+/*
 bool PrepareIntegrity() {
     LOG("Preparing Play Integrity token...");
 
@@ -495,12 +522,9 @@ bool PrepareIntegrity() {
     LOG("Play Integrity prepared successfully.");
     return true;
 }
+*/
 
-/**
- * 请求完整性令牌，绑定到特定请求的 hash
- * @param request_hash 请求体的 SHA256 摘要
- * @return integrity_token 字符串，失败返回空
- */
+/*
 std::string RequestIntegrityToken(const std::string& request_hash) {
     if (!g_integrity_ready) {
         LOG("WARNING: Integrity not prepared, skipping.");
@@ -528,11 +552,12 @@ std::string RequestIntegrityToken(const std::string& request_hash) {
     LOG("Integrity token obtained.");
     return result.value().token_bytes;
 }
+*/
 
 // ============================================================
-// HTTP 工具: 发送 GET 请求查询金币余额
+// [DISABLED] HTTP 工具: 发送 GET 请求查询金币余额 - Purchase not needed
 // ============================================================
-
+/*
 int QueryCoinsFromServer() {
     // 生成 request_hash (GET 请求无 body，使用路径作为哈希输入)
     std::string request_data = "GET /api/coins";
@@ -621,11 +646,12 @@ int QueryCoinsFromServer() {
 
     return coins;
 }
+*/
 
 // ============================================================
-// HTTP 工具: 发送 GET 请求查询分数
+// [DISABLED] HTTP 工具: 发送 GET 请求查询分数 - not needed without integrity
 // ============================================================
-
+/*
 int QueryScoreFromServer() {
     HINTERNET hSession = WinHttpOpen(L"GPG-BillingClient/1.0",
         WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
@@ -694,11 +720,12 @@ int QueryScoreFromServer() {
 
     return score;
 }
+*/
 
 // ============================================================
-// HTTP 请求: 将 purchase_token 发送到后端验证
+// [DISABLED] HTTP 请求: 将 purchase_token 发送到后端验证 - Purchase not needed
 // ============================================================
-
+/*
 struct ServerVerifyResult {
     bool success;
     std::string order_id;
@@ -844,6 +871,7 @@ ServerVerifyResult VerifyPurchaseWithServer(const std::string& product_id,
 
     return result;
 }
+*/
 
 // 带消息泵的等待，避免阻塞 UI 线程
 template<typename T>
@@ -859,6 +887,8 @@ T WaitWithMessagePump(std::future<T>& future) {
     return future.get();
 }
 
+// [DISABLED] Purchase flow functions - not needed, focus on Recall API
+/*
 bool ProcessPurchaseWithBackend(const std::string& purchase_token) {
     std::ostringstream log_msg;
     log_msg << "Processing purchase, token: " << purchase_token.substr(0, 20) << "...";
@@ -984,11 +1014,12 @@ int StartPurchaseFlow() {
     ShowWindow(g_gameWindow, SW_HIDE);
     return code;
 }
+*/
 
 // ============================================================
-// HTTP 请求: 发送 add-score 到后端 (受 Integrity 保护)
+// [DISABLED] HTTP 请求: 发送 add-score 到后端 (受 Integrity 保护) - not needed
 // ============================================================
-
+/*
 struct AddScoreResult {
     bool success;
     std::string error;
@@ -1116,6 +1147,7 @@ AddScoreResult AddScoreToServer(int addscore) {
 
     return result;
 }
+*/
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     std::ostringstream start_log;
@@ -1158,45 +1190,51 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         return 1;
     }
 
-    // 初始化 IntegrityClient (必须在 SDK 初始化后构造)
-    g_integrity_client = std::make_unique<IntegrityClient>();
+    // [DISABLED] Purchase/Integrity - not needed, focus on Recall API
+    // // 初始化 IntegrityClient (必须在 SDK 初始化后构造)
+    // g_integrity_client = std::make_unique<IntegrityClient>();
+    // // 初始化 Play Integrity (异步预热，减少后续请求延迟)
+    // PrepareIntegrity();
+    // // 初始化 BillingClient
+    // BillingClientParams bp;
+    // bp.enable_pending_purchases = true;
+    // g_billing_client = std::make_unique<BillingClient>(bp);
+    // // 先处理上次未消耗的购买（会在后端入账金币）
+    // ConsumeExistingPurchases();
+    // // 查询最新金币余额（包含刚消耗的）
+    // LOG("Querying coin balance from server...");
+    // int coins = QueryCoinsFromServer();
+    // if (coins >= 0) {
+    //     g_total_coins = coins;
+    //     std::ostringstream coin_log;
+    //     coin_log << "Current coin balance: " << g_total_coins;
+    //     LOG(coin_log.str().c_str());
+    // } else {
+    //     LOG("WARNING: Failed to query coin balance from server.");
+    // }
+    // // 查询最新分数
+    // LOG("Querying score from server...");
+    // int score = QueryScoreFromServer();
+    // if (score >= 0) {
+    //     g_total_score = score;
+    //     std::ostringstream score_log;
+    //     score_log << "Current score: " << g_total_score;
+    //     LOG(score_log.str().c_str());
+    // } else {
+    //     LOG("WARNING: Failed to query score from server.");
+    // }
 
-    // 初始化 Play Integrity (异步预热，减少后续请求延迟)
-    PrepareIntegrity();
+    // 主菜单循环 - 简化为只显示 Recall 登录结果
+    LOG("Recall login complete. Showing account info...");
 
-    // 初始化 BillingClient
-    BillingClientParams bp;
-    bp.enable_pending_purchases = true;
-    g_billing_client = std::make_unique<BillingClient>(bp);
+    std::ostringstream info_msg;
+    info_msg << "Recall Login Successful!\n\n"
+             << "Account ID: " << g_account_id << "\n"
+             << "Session ID: " << g_recall_session_id.substr(0, 30) << "...";
+    MessageBoxA(g_gameWindow, info_msg.str().c_str(), "Recall API Test", MB_OK | MB_ICONINFORMATION);
 
-    // 先处理上次未消耗的购买（会在后端入账金币）
-    ConsumeExistingPurchases();
-
-    // 查询最新金币余额（包含刚消耗的）
-    LOG("Querying coin balance from server...");
-    int coins = QueryCoinsFromServer();
-    if (coins >= 0) {
-        g_total_coins = coins;
-        std::ostringstream coin_log;
-        coin_log << "Current coin balance: " << g_total_coins;
-        LOG(coin_log.str().c_str());
-    } else {
-        LOG("WARNING: Failed to query coin balance from server.");
-    }
-
-    // 查询最新分数
-    LOG("Querying score from server...");
-    int score = QueryScoreFromServer();
-    if (score >= 0) {
-        g_total_score = score;
-        std::ostringstream score_log;
-        score_log << "Current score: " << g_total_score;
-        LOG(score_log.str().c_str());
-    } else {
-        LOG("WARNING: Failed to query score from server.");
-    }
-
-    // 主菜单循环 (使用 TaskDialog 自定义按钮文字)
+    // [DISABLED] 主菜单循环 (Purchase/Score 功能已移除)
+    /*
     const int BTN_ADD_SCORE = 100;
     const int BTN_PURCHASE = 101;
     const int BTN_EXIT = 102;
@@ -1246,8 +1284,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             running = false;
         }
     }
+    */
 
-    g_billing_client.reset();
+    // g_billing_client.reset();
     g_recall_client.reset();
     DestroyWindow(g_gameWindow);
     return 0;

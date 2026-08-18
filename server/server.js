@@ -7,9 +7,10 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 
 // 模块引入
-const { setIntegrityAuthClient } = require('./middleware/integrity');
-const { router: purchaseRouter, setPlayDeveloperApi } = require('./routes/purchase');
-const scoreRouter = require('./routes/score');
+// [DISABLED] Purchase/Integrity - not needed, focus on Recall API
+// const { setIntegrityAuthClient } = require('./middleware/integrity');
+// const { router: purchaseRouter, setPlayDeveloperApi } = require('./routes/purchase');
+// const scoreRouter = require('./routes/score');
 const { router: recallRouter, setGamesAuthClient } = require('./routes/recall');
 
 const app = express();
@@ -44,26 +45,26 @@ async function initGoogleApi() {
     keyFile: path.resolve(__dirname, keyFilePath),
     scopes: [
       'https://www.googleapis.com/auth/androidpublisher',
-      'https://www.googleapis.com/auth/playintegrity',
       'https://www.googleapis.com/auth/games',
     ],
   });
 
-  const playDeveloperApi = google.androidpublisher({
-    version: 'v3',
-    auth: auth,
-  });
+  // [DISABLED] Purchase/Integrity API init
+  // const playDeveloperApi = google.androidpublisher({
+  //   version: 'v3',
+  //   auth: auth,
+  // });
+  // setPlayDeveloperApi(playDeveloperApi);
 
-  // 注入到各模块
-  setPlayDeveloperApi(playDeveloperApi);
+  // const integrityAuthClient = await auth.getClient();
+  // setIntegrityAuthClient(integrityAuthClient);
 
-  const integrityAuthClient = await auth.getClient();
-  setIntegrityAuthClient(integrityAuthClient);
-  setGamesAuthClient(integrityAuthClient);
+  const gamesAuthClient = await auth.getClient();
+  setGamesAuthClient(gamesAuthClient);
 
-  console.log('[Billing Server] Google Play API initialized.');
-  console.log('[Billing Server] Play Integrity API initialized (REST mode for PC).');
-  console.log('[Billing Server] Recall API initialized.');
+  // console.log('[Billing Server] Google Play API initialized.');
+  // console.log('[Billing Server] Play Integrity API initialized (REST mode for PC).');
+  console.log('[Server] Google Games API initialized (Recall only).');
 }
 
 // ============================================================
@@ -76,10 +77,12 @@ app.get('/api/health', (req, res) => {
 });
 
 // 购买相关路由
-app.use('/api', purchaseRouter);
+// [DISABLED] Purchase/Integrity - not needed, focus on Recall API
+// app.use('/api', purchaseRouter);
 
 // 分数相关路由
-app.use('/api', scoreRouter);
+// [DISABLED] Score uses Integrity - not needed, focus on Recall API
+// app.use('/api', scoreRouter);
 
 // Recall 相关路由
 app.use('/api', recallRouter);
@@ -89,9 +92,10 @@ app.use('/api', recallRouter);
 // ============================================================
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
-const ALLOWED_PRODUCT_IDS = (process.env.ALLOWED_PRODUCT_IDS || '100_coins')
-  .split(',')
-  .map((id) => id.trim());
+// [DISABLED] Purchase not needed
+// const ALLOWED_PRODUCT_IDS = (process.env.ALLOWED_PRODUCT_IDS || '100_coins')
+//   .split(',')
+//   .map((id) => id.trim());
 
 async function start() {
   try {
@@ -103,9 +107,8 @@ async function start() {
   }
 
   app.listen(PORT, () => {
-    console.log(`[Billing Server] Running on port ${PORT}`);
-    console.log(`[Billing Server] Package: ${PACKAGE_NAME}`);
-    console.log(`[Billing Server] Allowed products: ${ALLOWED_PRODUCT_IDS.join(', ')}`);
+    console.log(`[Server] Running on port ${PORT}`);
+    console.log(`[Server] Focus: Recall API only`);
   });
 }
 

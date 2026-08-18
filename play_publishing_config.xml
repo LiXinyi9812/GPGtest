@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <play-publishing-config version="1.0">
   <application>
-    <package-name>com.dynasty.cnpdctest</package-name>
-    <version-name>version-name..1</version-name>
+    <package-name>com.leatestgps</package-name>
+    <version-name>1.0.0</version-name>
   </application>
   <installer requiresElevation="false" acceptsCommandLineArguments="false">
     <path>GPGInstaller.exe</path>
