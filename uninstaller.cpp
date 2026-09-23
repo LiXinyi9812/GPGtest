@@ -96,15 +96,7 @@ bool RemoveUninstallRegistry() {
     }
 }
 
-// 确认卸载
-bool ConfirmUninstall() {
-    std::wcout << L"Are you sure you want to uninstall? (y/n): ";
-    wchar_t response;
-    std::wcin >> response;
-    return (response == L'y' || response == L'Y');
-}
-
-int wmain(int argc, wchar_t* argv[]) {
+int wmain() {
     std::wcout << L"========================================" << std::endl;
     std::wcout << L"  GPG Application Uninstaller" << std::endl;
     std::wcout << L"========================================" << std::endl;
@@ -114,21 +106,6 @@ int wmain(int argc, wchar_t* argv[]) {
     std::wstring installDir = GetUninstallerDirectory();
     std::wcout << L"Install directory: " << installDir << std::endl;
     std::wcout << std::endl;
-
-    // 静默模式检查（命令行参数 /S 或 /silent）
-    bool silent = false;
-    if (argc > 1) {
-        std::wstring arg = argv[1];
-        if (arg == L"/S" || arg == L"/silent") {
-            silent = true;
-        }
-    }
-
-    // 确认卸载
-    if (!silent && !ConfirmUninstall()) {
-        std::wcout << L"Uninstallation cancelled." << std::endl;
-        return 0;
-    }
 
     std::wcout << L"Starting uninstallation..." << std::endl;
     std::wcout << std::endl;
@@ -162,13 +139,6 @@ int wmain(int argc, wchar_t* argv[]) {
         std::wcout << L"========================================" << std::endl;
         std::wcout << L"  Uninstallation completed with warnings" << std::endl;
         std::wcout << L"========================================" << std::endl;
-    }
-
-    if (!silent) {
-        std::wcout << std::endl;
-        std::wcout << L"Press any key to exit..." << std::endl;
-        std::wcin.ignore();
-        std::wcin.get();
     }
 
     return 0;

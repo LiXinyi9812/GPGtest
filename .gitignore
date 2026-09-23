@@ -28,3 +28,9 @@ obj/
 # Debug files
 *.ilk
 *.pdb
+
+# Server secrets and local data
+server/.env
+server/service-account-key.json
+server/node_modules/
+server/coins.db

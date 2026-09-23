@@ -5,9 +5,16 @@
 #include <fstream>
 #include "installer_resources.h"
 
-// 默认安装目录
-static const wchar_t* DEFAULT_INSTALL_DIR = L"C:\\Program Files\\GPG";
 static const wchar_t* APP_NAME = L"GPG Application";
+
+// 获取默认安装目录：%LOCALAPPDATA%\GPG（不需要管理员权限即可写入）
+std::wstring GetDefaultInstallDir() {
+    wchar_t localAppData[MAX_PATH];
+    if (SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localAppData) != S_OK) {
+        return L"C:\\GPG";
+    }
+    return std::wstring(localAppData) + L"\\GPG";
+}
 
 // 从嵌入资源中提取文件到目标路径
 bool ExtractResource(int resourceId, const std::wstring& destPath) {
@@ -141,7 +148,7 @@ int wmain(int argc, wchar_t* argv[]) {
     if (argc > 1) {
         installDir = argv[1];
     } else {
-        installDir = DEFAULT_INSTALL_DIR;
+        installDir = GetDefaultInstallDir();
     }
 
     std::wcout << L"Install directory: " << installDir << std::endl;
@@ -150,7 +157,6 @@ int wmain(int argc, wchar_t* argv[]) {
     // 创建安装目录
     if (!CreateDirectoryRecursive(installDir)) {
         std::wcerr << L"Failed to create install directory" << std::endl;
-        system("pause");
         return 1;
     }
 
@@ -166,7 +172,6 @@ int wmain(int argc, wchar_t* argv[]) {
 
     if (!success) {
         std::wcerr << L"Failed to extract all files" << std::endl;
-        system("pause");
         return 1;
     }
 
@@ -184,9 +189,6 @@ int wmain(int argc, wchar_t* argv[]) {
     std::wcout << L"========================================" << std::endl;
     std::wcout << L"  Installation completed successfully!" << std::endl;
     std::wcout << L"========================================" << std::endl;
-    std::wcout << std::endl;
-    std::wcout << L"Press any key to exit..." << std::endl;
-    std::wcin.get();
 
     return 0;
 }

@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/18/Community/MSBuild/Current/Bin/MSBuild.exe\" GPG.sln /t:Clean /p:Configuration=Debug /p:Platform=x64)",
+      "PowerShell(cd \"c:\\\\Users\\\\devre\\\\OneDrive\\\\GPG\"; [xml]$x = Get-Content play_publishing_config.xml; $x.'play-publishing-config'.application.'version-name')",
+      "PowerShell(cd \"c:\\\\Users\\\\devre\\\\OneDrive\\\\GPG\"; $x = [xml]\\(Get-Content 'play_publishing_config.xml'\\); $v = [version]$x.'play-publishing-config'.application.'version-name'; $n = New-Object version\\($v.Major,$v.Minor,\\($v.Build+1\\)\\); $x.'play-publishing-config'.application.'version-name' = $n.ToString\\(\\); $x.Save\\(\\(Resolve-Path 'play_publishing_config.xml'\\).Path\\); Write-Output $n.ToString\\(\\))",
+      "Bash('/c/Program Files/Microsoft Visual Studio/18/Community/MSBuild/Current/Bin/MSBuild.exe' GPG.sln /t:GPGInstaller,GPGUninstaller /p:Configuration=Debug /p:Platform=x64)",
+      "Bash('/c/Program Files/Microsoft Visual Studio/18/Community/MSBuild/Current/Bin/MSBuild.exe' GPG.sln -t:GPGInstaller,GPGUninstaller -p:Configuration=Debug -p:Platform=x64)",
+      "Bash(powershell -Command \"\\(Get-Item 'imports\\\\x64\\\\play_pc_sdk.dll'\\).VersionInfo | Format-List *\")",
+      "Bash(powershell -Command \"\\(Get-Item 'C:/Users/devre/AppData/Local/GPG/play_pc_sdk.dll'\\).VersionInfo.FileVersion\")",
+      "Bash(./play_publishing_tool_1.0.3.exe --help)",
+      "Bash(./play_publishing_tool_1.0.3.exe build-installer-bundle *)",
+      "Bash(./play_publishing_tool_1.0.3.exe help *)"
+    ]
+  }
+}

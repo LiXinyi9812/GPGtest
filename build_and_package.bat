@@ -54,28 +54,26 @@ if /I "%ENABLE_SIGNING%"=="YES" (
     )
 )
 
-echo Step 1: Incrementing version number...
+echo Step 1: Version number...
 set CONFIG_FILE=play_publishing_config.xml
 
-REM 读取当前版本号
-for /f "tokens=2 delims=<>" %%a in ('findstr /r "<version-name>" %CONFIG_FILE%') do set CURRENT_VERSION=%%a
-echo Current version: %CURRENT_VERSION%
+REM 是否自动递增版本号（YES 或 NO）。设为 NO 时保留 XML 中已手动填写的版本号
+set AUTO_INCREMENT_VERSION=YES
 
-REM 分解版本号 (major.minor.patch)
-for /f "tokens=1,2,3 delims=." %%a in ("%CURRENT_VERSION%") do (
-    set MAJOR=%%a
-    set MINOR=%%b
-    set PATCH=%%c
+for /f "usebackq delims=" %%a in (`powershell -NoProfile -ExecutionPolicy Bypass -File "increment_version.ps1" -ConfigFile "%CONFIG_FILE%" -AutoIncrement "%AUTO_INCREMENT_VERSION%"`) do set NEW_VERSION=%%a
+
+if /I "%AUTO_INCREMENT_VERSION%"=="YES" (
+    echo New version: %NEW_VERSION%
+    echo Version updated successfully.
+) else (
+    echo Using existing version from %CONFIG_FILE%: %NEW_VERSION%
+    echo Auto-increment is disabled, edit version-name manually to change it.
 )
 
-REM 递增 patch 版本号
-set /a PATCH+=1
-set NEW_VERSION=%MAJOR%.%MINOR%.%PATCH%
-echo New version: %NEW_VERSION%
-
-REM 更新 XML 文件中的版本号
-powershell -Command "(Get-Content '%CONFIG_FILE%') -replace '<version-name>.*</version-name>', '<version-name>%NEW_VERSION%</version-name>' | Set-Content '%CONFIG_FILE%'"
-echo Version updated successfully.
+if "%NEW_VERSION%"=="" (
+    echo ERROR: Failed to read/update version-name via PowerShell.
+    goto :error
+)
 echo.
 
 echo Step 2: Cleaning previous build...
