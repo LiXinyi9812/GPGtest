@@ -81,17 +81,17 @@ echo Step 2: Cleaning previous build...
 if errorlevel 1 goto :error
 
 echo.
-echo Step 3: Building all projects...
-%MSBUILD% GPG.sln /t:Build /p:Configuration=%BUILD_CONFIG% /p:Platform=x64
+echo Step 3: Building game, launcher, and uninstaller...
+%MSBUILD% GPG.vcxproj /t:Build /p:Configuration=%BUILD_CONFIG% /p:Platform=x64
+if errorlevel 1 goto :error
+%MSBUILD% GPGLauncher.vcxproj /t:Build /p:Configuration=%BUILD_CONFIG% /p:Platform=x64
+if errorlevel 1 goto :error
+%MSBUILD% GPGUninstaller.vcxproj /t:Build /p:Configuration=%BUILD_CONFIG% /p:Platform=x64
 if errorlevel 1 goto :error
 
 echo.
-echo Step 4: Verifying output files...
+echo Step 4: Verifying and signing inner executables before packaging installer...
 cd bin\%BUILD_CONFIG%
-if not exist GPGInstaller.exe (
-    echo ERROR: GPGInstaller.exe not found
-    goto :error
-)
 if not exist GPGLauncher.exe (
     echo ERROR: GPGLauncher.exe not found
     goto :error
@@ -100,41 +100,58 @@ if not exist GPG.exe (
     echo ERROR: GPG.exe not found
     goto :error
 )
+if not exist GPGUninstaller.exe (
+    echo ERROR: GPGUninstaller.exe not found
+    goto :error
+)
 if not exist play_pc_sdk.dll (
     echo ERROR: play_pc_sdk.dll not found
     goto :error
 )
-echo All required files are present.
 
-REM ================================================
-REM 代码签名步骤
-REM ================================================
 if /I "%ENABLE_SIGNING%"=="YES" (
     echo.
-    echo Step 5: Code Signing...
+    echo Step 4.5: Signing inner executables ^(GPG.exe, GPGLauncher.exe, GPGUninstaller.exe^)...
     echo ----------------------------------------
-
-    set FILES=GPG.exe GPGLauncher.exe GPGInstaller.exe GPGUninstaller.exe
-
-    for %%f in (!FILES!) do (
+    set INNER_FILES=GPG.exe GPGLauncher.exe GPGUninstaller.exe
+    for %%f in (!INNER_FILES!) do (
         echo Signing: %%f
-
-        if not exist "%%f" (
-            echo   WARNING: %%f not found, skipping
+        %SIGNTOOL% sign %SIGN_PARAMS% /t %TIMESTAMP_URL% /fd SHA256 /v "%%f"
+        if errorlevel 1 (
+            echo   ERROR: Failed to sign %%f
+            cd ..\..
+            goto :error
         ) else (
-            %SIGNTOOL% sign %SIGN_PARAMS% /t %TIMESTAMP_URL% /fd SHA256 /v "%%f"
-
-            if errorlevel 1 (
-                echo   ERROR: Failed to sign %%f
-                cd ..\..
-                goto :error
-            ) else (
-                echo   SUCCESS: %%f signed
-            )
+            echo   SUCCESS: %%f signed
         )
         echo.
     )
+)
+cd ..\..
 
+echo.
+echo Step 5: Building GPGInstaller.exe ^(embedding signed executables^)...
+%MSBUILD% GPGInstaller.vcxproj /t:Rebuild /p:Configuration=%BUILD_CONFIG% /p:Platform=x64 /p:BuildProjectReferences=false
+if errorlevel 1 goto :error
+
+cd bin\%BUILD_CONFIG%
+if not exist GPGInstaller.exe (
+    echo ERROR: GPGInstaller.exe not found
+    goto :error
+)
+
+if /I "%ENABLE_SIGNING%"=="YES" (
+    echo.
+    echo Step 5.5: Signing GPGInstaller.exe...
+    echo ----------------------------------------
+    %SIGNTOOL% sign %SIGN_PARAMS% /t %TIMESTAMP_URL% /fd SHA256 /v "GPGInstaller.exe"
+    if errorlevel 1 (
+        echo   ERROR: Failed to sign GPGInstaller.exe
+        cd ..\..
+        goto :error
+    ) else (
+        echo   SUCCESS: GPGInstaller.exe signed
+    )
     echo ----------------------------------------
     echo Code signing completed!
     echo.
